@@ -25,7 +25,7 @@ data class ReceiptOcrResult(
 object ReceiptOcrAnalyzer {
 
     fun createCaptureUri(context: Context): Uri {
-        val dir = File(context.cacheDir, "images").apply { mkdirs() }
+        val dir = File(context.filesDir, "images").apply { mkdirs() }
         val file = File(dir, "ocr_${System.currentTimeMillis()}.jpg")
         return FileProvider.getUriForFile(
             context,

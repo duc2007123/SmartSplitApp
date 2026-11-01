@@ -1,0 +1,37 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isProjectMember(projectId) {
+      return signedIn()
+        && request.auth.uid in firestore.get(
+          /databases/(default)/documents/projects/$(projectId)
+        ).data.memberIds;
+    }
+
+    match /users/{userId}/qr/{fileName} {
+      allow read: if signedIn();
+      allow write: if signedIn()
+        && request.auth.uid == userId
+        && request.resource.size < 10 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+
+    match /projects/{projectId}/bills/{billId}/receipt/{fileName} {
+      allow read: if isProjectMember(projectId);
+      allow write: if isProjectMember(projectId)
+        && request.resource.size < 15 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+
+    match /projects/{projectId}/bills/{billId}/proof/{memberId}/{fileName} {
+      allow read: if isProjectMember(projectId);
+      allow write: if isProjectMember(projectId)
+        && request.resource.size < 15 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+  }
+}
