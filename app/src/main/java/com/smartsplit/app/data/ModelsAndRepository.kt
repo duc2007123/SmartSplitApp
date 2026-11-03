@@ -97,9 +97,39 @@ data class BillItem(
     val name: String,
     val quantity: Int = 1,
     val unitPrice: Long,
-    val payerUserIds: List<String> = emptyList() // Danh sách ID các user cùng chia tiền món này
+    val payerUserIds: List<String> = emptyList(),
+    val payerAmounts: Map<String, Long> = emptyMap()
 ) {
     val totalPrice: Long get() = quantity * unitPrice
+}
+
+fun BillItem.sharesFor(memberIds: Collection<String>): Map<String, Long> {
+    val payers = (payerUserIds.ifEmpty { memberIds.toList() })
+        .distinct()
+        .filter { it in memberIds }
+    if (payers.isEmpty()) return emptyMap()
+
+    val storedAmounts = payerAmounts.filterKeys { it in payers }
+    if (payers.all { it in storedAmounts } && storedAmounts.values.sum() == totalPrice) {
+        return storedAmounts
+    }
+
+    val baseAmount = totalPrice / payers.size
+    val remainder = totalPrice % payers.size
+    return payers.mapIndexed { index, userId ->
+        userId to baseAmount + if (index < remainder) 1L else 0L
+    }.toMap()
+}
+
+fun BillItem.hasValidSharesFor(memberIds: Collection<String>): Boolean {
+    val payers = (payerUserIds.ifEmpty { memberIds.toList() })
+        .distinct()
+        .filter { it in memberIds }
+    if (payers.isEmpty()) return false
+    if (payerAmounts.isEmpty()) return true
+    return payerAmounts.keys == payers.toSet() &&
+        payerAmounts.values.all { it >= 0L } &&
+        payerAmounts.values.sum() == totalPrice
 }
 
 // ==========================================
@@ -110,6 +140,7 @@ data class MemberBillStatus(
     val itemCount: Int = 0,
     val amountOwed: Long = 0L,
     val isApproved: Boolean = false,        // Người này đã bấm Duyệt phần của tôi (1.9.4.2)
+    val hasExplicitApproval: Boolean = false,
     val isPaid: Boolean = false,            // Người này đã thanh toán (1.9.4.4)
     val proofImageUri: String? = null,      // Ảnh chụp biên lai chuyển tiền (1.9.4.4)
     val isCreatorConfirmed: Boolean = false // Chủ bill đã bấm Confirm đã nhận tiền (1.9.4.5)
@@ -171,9 +202,16 @@ data class Bill(
         get() = if (items.isNotEmpty()) items.sumOf { it.totalPrice }
                 else memberStatuses.values.sumOf { it.amountOwed }
 
+    fun isMemberApproved(userId: String): Boolean {
+        val status = memberStatuses[userId] ?: return false
+        if (userId == creatorId || status.amountOwed <= 0L) return true
+        val isCreditor = userId == advanceUserId && debtObject == null
+        return status.isApproved && (!isCreditor || status.hasExplicitApproval)
+    }
+
     // Kiểm tra xem bill này đã được duyệt hết chưa (Mặt ngoài 1.9.4)
     val isAllApproved: Boolean
-        get() = memberStatuses.isNotEmpty() && memberStatuses.values.all { it.isApproved }
+        get() = memberStatuses.isNotEmpty() && memberStatuses.keys.all(::isMemberApproved)
 
     // Kiểm tra xem bill này đã được thanh toán hết chưa (Mặt ngoài 1.9.4)
     val isAllPaid: Boolean
@@ -192,7 +230,14 @@ fun Bill.unpaidAmountFor(userId: String): Long {
                 .sumOf { it.amount }
         }
         val status = memberStatuses[userId] ?: return 0L
-        return if (status.isCreatorConfirmed) 0L else status.amountOwed
+        return if (
+            (debtObject != null || isMemberApproved(userId)) &&
+            !status.isCreatorConfirmed
+        ) {
+            status.amountOwed
+        } else {
+            0L
+        }
 }
 
 // Thông báo hệ thống (Notification Push)
@@ -200,7 +245,9 @@ data class AppNotification(
     val id: String = UUID.randomUUID().toString(),
     val title: String,
     val message: String,
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    val senderUserId: String? = null,
+    val projectId: String? = null
 )
 
 // ==========================================
@@ -262,6 +309,16 @@ object AppRepository {
             },
             onNotifications = { notifications ->
                 _notifications.value = notifications
+            },
+            onIncomingNotification = { notification ->
+                appContext?.let { context ->
+                    NotificationHelper.showNotification(
+                        context = context,
+                        title = notification.title,
+                        message = notification.message,
+                        notificationId = NOTIFICATION_ID_BASE + (notification.id.hashCode() and 0x7fffffff) % 100000
+                    )
+                }
             }
         )
     }
@@ -551,7 +608,7 @@ object AppRepository {
         _bills.value = listOf(bill) + _bills.value
         if (!bill.isMergedParent) adjustProjectRemaining(bill.projectId, -bill.totalAmount)
         persistCurrentData()
-        pushNotification("Hóa đơn mới", "Có hóa đơn mới: \"${bill.title}\" (${formatCurrency(bill.totalAmount)})")
+        notifyMembersWhoNeedApproval(bill, _currentUserId.value)
     }
 
     fun updateBill(updatedBill: Bill) {
@@ -569,10 +626,19 @@ object AppRepository {
         val normalizedItems = updatedBill.items.map { item ->
             item.copy(name = item.name.trim(), quantity = item.quantity.coerceAtLeast(1))
         }
+        if (normalizedItems.any { !it.hasValidSharesFor(oldBill.memberStatuses.keys) }) return false
         val normalizedBill = updatedBill.copy(title = updatedBill.title.trim(), items = normalizedItems)
-        if (oldBill.title == normalizedBill.title && oldBill.items == normalizedItems) return true
+        if (
+            oldBill.title == normalizedBill.title &&
+            oldBill.items == normalizedItems &&
+            oldBill.advanceUserId == normalizedBill.advanceUserId &&
+            oldBill.mode == normalizedBill.mode
+        ) return true
         val savedBill = normalizedBill.copy(
-            memberStatuses = recalculateStatuses(oldBill, normalizedItems),
+            memberStatuses = recalculateStatuses(
+                normalizedBill.copy(memberStatuses = oldBill.memberStatuses),
+                normalizedItems
+            ),
             editHistory = oldBill.editHistory + BillEditHistory(
                 editorUserId = editorId,
                 changes = describeBillChanges(oldBill, normalizedBill)
@@ -585,7 +651,47 @@ object AppRepository {
             "Bill đã chỉnh sửa",
             "${getUserById(editorId)?.name ?: "Thành viên"} đã sửa bill “${oldBill.title}”."
         )
+        notifyMembersWhoNeedApproval(savedBill, editorId)
         return true
+    }
+
+    private fun notifyMembersWhoNeedApproval(bill: Bill, senderUserId: String?) {
+        val projectMembers = _projects.value
+            .firstOrNull { it.id == bill.projectId }
+            ?.memberIds
+            .orEmpty()
+        bill.memberStatuses.forEach { (memberId, status) ->
+            if (
+                memberId != senderUserId &&
+                memberId in projectMembers &&
+                status.amountOwed > 0L &&
+                !bill.isMemberApproved(memberId)
+            ) {
+                sendNotificationToUser(
+                    recipientUserId = memberId,
+                    projectId = bill.projectId,
+                    title = "Bill cần bạn duyệt",
+                    message = "Bill “${bill.title}” có phần của bạn ${formatCurrency(status.amountOwed)}. Mở SmartSplit để xem và duyệt."
+                )
+            }
+        }
+    }
+
+    private fun sendNotificationToUser(
+        recipientUserId: String,
+        projectId: String,
+        title: String,
+        message: String
+    ) {
+        val senderUserId = _currentUserId.value ?: return
+        if (recipientUserId == senderUserId) return
+        val notification = AppNotification(
+            title = title,
+            message = message,
+            senderUserId = senderUserId,
+            projectId = projectId
+        )
+        cloudDataRepository?.saveNotification(recipientUserId, notification)
     }
 
     private fun recalculateStatuses(
@@ -594,36 +700,16 @@ object AppRepository {
     ): Map<String, MemberBillStatus> {
         val amounts = bill.memberStatuses.keys.associateWith { 0L }.toMutableMap()
         val itemCounts = bill.memberStatuses.keys.associateWith { 0 }.toMutableMap()
-        val payerSelectionUnchanged = bill.items.map { it.id to it.payerUserIds } ==
-            items.map { it.id to it.payerUserIds }
         if (items.isEmpty()) {
             bill.memberStatuses.forEach { (userId, status) ->
                 amounts[userId] = status.amountOwed
                 itemCounts[userId] = status.itemCount
             }
-        } else if (payerSelectionUnchanged && bill.totalAmount > 0L) {
-            var distributed = 0L
-            val members = bill.memberStatuses.keys.toList()
-            members.forEachIndexed { index, userId ->
-                val share = if (index == members.lastIndex) {
-                    items.sumOf { it.totalPrice } - distributed
-                } else {
-                    items.sumOf { it.totalPrice } * bill.memberStatuses.getValue(userId).amountOwed / bill.totalAmount
-                }
-                amounts[userId] = share
-                distributed += share
-            }
-            bill.memberStatuses.forEach { (userId, status) -> itemCounts[userId] = status.itemCount }
         } else {
             items.forEach { item ->
-                val payers = item.payerUserIds.filter { it in amounts }.ifEmpty { amounts.keys.toList() }
-                if (payers.isNotEmpty()) {
-                    val baseAmount = item.totalPrice / payers.size
-                    val remainder = item.totalPrice % payers.size
-                    payers.forEachIndexed { index, userId ->
-                        amounts[userId] = (amounts[userId] ?: 0L) + baseAmount + if (index < remainder) 1L else 0L
-                        itemCounts[userId] = (itemCounts[userId] ?: 0) + 1
-                    }
+                item.sharesFor(amounts.keys).forEach { (userId, amount) ->
+                    amounts[userId] = (amounts[userId] ?: 0L) + amount
+                    itemCounts[userId] = (itemCounts[userId] ?: 0) + 1
                 }
             }
         }
@@ -634,7 +720,8 @@ object AppRepository {
             status.copy(
                 itemCount = itemCounts[userId] ?: 0,
                 amountOwed = amount,
-                isApproved = creditorPaid || amount == 0L,
+                isApproved = userId == bill.creatorId || amount <= 0L,
+                hasExplicitApproval = false,
                 isPaid = creditorPaid || amount == 0L,
                 proofImageUri = null,
                 isCreatorConfirmed = creditorPaid || amount == 0L
@@ -668,6 +755,9 @@ object AppRepository {
                     .map { getUserById(it)?.name ?: it }
                     .ifEmpty { listOf("Chưa chọn") }
                 itemChanges += "người chia: ${payerNames.joinToString()}"
+            }
+            if (old.payerAmounts != updated.payerAmounts) {
+                itemChanges += "số tiền mỗi người chia được cập nhật"
             }
             if (itemChanges.isNotEmpty()) changes += "${updated.name}: ${itemChanges.joinToString(", ")}"
         }
@@ -725,31 +815,36 @@ object AppRepository {
         _bills.value = _bills.value.map { bill ->
             if (bill.id == billId) {
                 val currentStatus = bill.memberStatuses[userId] ?: return@map bill
-                if (
-                    currentStatus.amountOwed > 0L &&
-                    bill.debtObject == null &&
-                    !currentStatus.isCreatorConfirmed
-                ) return@map bill
+                if (currentStatus.amountOwed <= 0L || bill.isMemberApproved(userId)) return@map bill
                 val newStatuses = bill.memberStatuses.toMutableMap()
-                newStatuses[userId] = currentStatus.copy(isApproved = true)
+                newStatuses[userId] = currentStatus.copy(
+                    isApproved = true,
+                    hasExplicitApproval = true
+                )
                 bill.copy(memberStatuses = newStatuses)
             } else bill
         }
         persistCurrentData()
-        pushNotification("Duyệt bill", "Thành viên ${getUserById(userId)?.name} đã duyệt phần chi tiêu!")
     }
 
     // ==========================================
     // A payment report clears debt only for object-backed bills; other bills await creditor confirmation.
     // ==========================================
     fun markMemberAsPaid(billId: String, userId: String) {
+        val originalBill = _bills.value.firstOrNull { it.id == billId } ?: return
+        val originalStatus = originalBill.memberStatuses[userId] ?: return
+        if (originalStatus.isPaid || originalStatus.isCreatorConfirmed) return
         _bills.value = _bills.value.map { bill ->
             if (bill.id == billId) {
                 val status = bill.memberStatuses[userId] ?: return@map bill
+                if (
+                    bill.debtObject == null &&
+                    !bill.isMemberApproved(userId) &&
+                    status.amountOwed > 0L
+                ) return@map bill
                 val newStatuses = bill.memberStatuses.toMutableMap()
                 newStatuses[userId] = if (bill.debtObject != null) {
                     status.copy(
-                        isApproved = true,
                         isPaid = true,
                         isCreatorConfirmed = true
                     )
@@ -760,20 +855,26 @@ object AppRepository {
             } else bill
         }
         persistCurrentData()
-        val bill = _bills.value.firstOrNull { it.id == billId }
-        val message = if (bill?.debtObject != null) {
-            "${getUserById(userId)?.name} đã tự xác nhận thanh toán khoản nợ chung."
-        } else {
-            "${getUserById(userId)?.name} đã báo thanh toán; chờ người ứng xác nhận nhận tiền."
+        if (originalBill.debtObject == null) {
+            val creditorId = originalBill.advanceUserId ?: originalBill.creatorId
+            sendNotificationToUser(
+                recipientUserId = creditorId,
+                projectId = originalBill.projectId,
+                title = "Thành viên báo đã trả tiền",
+                message = "${getUserById(userId)?.name ?: "Một thành viên"} đã báo chuyển ${formatCurrency(originalStatus.amountOwed)} cho bill “${originalBill.title}”. Hãy xác nhận đã nhận tiền."
+            )
         }
-        pushNotification("Thanh toán", message)
     }
 
     fun saveMemberPaymentProof(billId: String, userId: String, proofUri: String) {
         _bills.value = _bills.value.map { bill ->
             if (bill.id == billId) {
                 val status = bill.memberStatuses[userId] ?: return@map bill
-                if (bill.debtObject != null || status.isCreatorConfirmed) return@map bill
+                if (
+                    bill.debtObject != null ||
+                    status.isCreatorConfirmed ||
+                    !bill.isMemberApproved(userId)
+                ) return@map bill
                 val newStatuses = bill.memberStatuses.toMutableMap()
                 newStatuses[userId] = status.copy(proofImageUri = proofUri)
                 bill.copy(memberStatuses = newStatuses)
@@ -792,10 +893,11 @@ object AppRepository {
         _bills.value = _bills.value.map { bill ->
             if (bill.id == billId) {
                 val status = bill.memberStatuses[userId] ?: return@map bill
-                if (!status.isPaid || bill.debtObject != null) return@map bill
+                if (!status.isPaid || bill.debtObject != null || !bill.isMemberApproved(userId)) {
+                    return@map bill
+                }
                 val newStatuses = bill.memberStatuses.toMutableMap()
                 newStatuses[userId] = status.copy(
-                    isApproved = true,
                     isPaid = true,
                     isCreatorConfirmed = true
                 )
@@ -813,7 +915,6 @@ object AppRepository {
                 if (!status.isPaid || status.isCreatorConfirmed) return@map bill
                 val newStatuses = bill.memberStatuses.toMutableMap()
                 newStatuses[userId] = status.copy(
-                    isApproved = false,
                     isPaid = false,
                     proofImageUri = null,
                     isCreatorConfirmed = false
@@ -845,6 +946,13 @@ object AppRepository {
         val project = _projects.value.firstOrNull { it.inviteCode.equals(projectCode, ignoreCase = true) }
         val targetUser = (_users.value + sampleUsers)
             .firstOrNull { it.name.equals(payerName, ignoreCase = true) } ?: return
+        val matchedBill = _bills.value.firstOrNull { bill ->
+            project != null &&
+                bill.projectId == project.id &&
+                !bill.isMergedParent &&
+                bill.id.contains(billCode, ignoreCase = true)
+        }
+        val previousPaymentStatus = matchedBill?.memberStatuses?.get(targetUser.id)
 
         _bills.value = _bills.value.map { bill ->
             // Kiểm tra khớp bill lẻ hoặc bill gộp
@@ -869,8 +977,20 @@ object AppRepository {
                 } else bill
             } else bill
         }
-
         persistCurrentData()
+        if (
+            matchedBill != null &&
+            previousPaymentStatus != null &&
+            !previousPaymentStatus.isPaid &&
+            matchedBill.debtObject == null
+        ) {
+            sendNotificationToUser(
+                recipientUserId = matchedBill.advanceUserId ?: matchedBill.creatorId,
+                projectId = matchedBill.projectId,
+                title = "Đã nhận báo giao dịch",
+                message = "${targetUser.name} đã chuyển ${formatCurrency(previousPaymentStatus.amountOwed)} cho bill “${matchedBill.title}”. Hãy xác nhận đã nhận tiền."
+            )
+        }
         pushNotification(
             "Tự động gạch nợ VietQR",
             "Đã nhận diện mã $transferCode từ ngân hàng. Đã ghi nhận người trả đã thanh toán; người ứng cần xác nhận đã nhận tiền."
@@ -880,7 +1000,7 @@ object AppRepository {
     // ==========================================
     // [MỤC 1.9.5] THUẬT TOÁN GỘP CÁC BILL ĐÃ DUYỆT & XOAY VÒNG TIỀN (MINIMUM CASH FLOW)
     // ==========================================
-    fun mergeApprovedBills(projectId: String): Bill? {
+    fun mergeApprovedBills(projectId: String, selectedBillIds: Set<String>? = null): Bill? {
         val project = _projects.value.firstOrNull { it.id == projectId } ?: return null
 
         // ----------------------------------------------------
@@ -892,12 +1012,15 @@ object AppRepository {
             bill.projectId == projectId &&
             !bill.isMergedParent &&
             bill.mergedIntoBillId == null &&
+            bill.debtObject == null &&
             bill.isAllApproved &&
-            !bill.isAllPaid
+            !bill.isAllPaid &&
+            bill.memberStatuses.values.any { it.amountOwed > 0L && !it.isCreatorConfirmed } &&
+            (selectedBillIds == null || bill.id in selectedBillIds)
         }
 
         if (eligibleBills.size < 2) {
-            pushNotification("Không thể gộp", "Cần ít nhất 2 bill đã duyệt và chưa thanh toán để gộp xoay vòng tiền!")
+            pushNotification("Không thể gộp", "Cần chọn ít nhất 2 bill đã duyệt còn khoản chưa thanh toán.")
             return null
         }
 

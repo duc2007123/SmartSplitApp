@@ -75,12 +75,17 @@ fun BillDetailScreen(
     val creator = AppRepository.getUserById(bill.creatorId)
     val advanceUser = bill.advanceUserId?.let(AppRepository::getUserById)
     val isCurrentUserCreator = currentUser.id == bill.creatorId
+    val canEditBill = isCurrentUserCreator || bill.mode == InputMode.NB2
     val creditorUserId = bill.advanceUserId ?: bill.debtObject?.ownerUserId ?: bill.creatorId
     val isCurrentUserCreditor = currentUser.id == creditorUserId
 
     // Trạng thái của user hiện tại trong bill này
     val myStatus = bill.memberStatuses[currentUser.id]
-    val amountToPay = myStatus?.amountOwed ?: 0L
+    val amountToPay = if (bill.debtObject != null || bill.isMemberApproved(currentUser.id)) {
+        myStatus?.amountOwed ?: 0L
+    } else {
+        0L
+    }
 
     // Cú pháp quy ước mã chuyển khoản: SM_[MãDựÁn]_[MãBill]_[TênNgườiTrả]
     // [SỬA NHANH KHI VẤN ĐÁP] Cú pháp chuỗi nhận diện VietQR
@@ -137,8 +142,6 @@ fun BillDetailScreen(
             Toast.makeText(context, "Cần quyền camera để chụp ảnh hóa đơn.", Toast.LENGTH_LONG).show()
         }
     }
-    var showNb2EditDialog by remember { mutableStateOf(false) }
-    var editingItemId by remember { mutableStateOf<String?>(null) }
     var showDeleteBillDialog by remember { mutableStateOf(false) }
     val proofPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -183,10 +186,10 @@ fun BillDetailScreen(
                 },
                 actions = {
                     // ==========================================
-                    // Chỉ chủ bill được chỉnh sửa nội dung bill.
+                    // Chế độ NB2 dùng chung một trình sửa cho mọi thành viên.
                     // ==========================================
                     if (
-                        isCurrentUserCreator &&
+                        canEditBill &&
                         !bill.isMergedParent &&
                         bill.mergedIntoBillId == null
                     ) {
@@ -325,75 +328,16 @@ fun BillDetailScreen(
                                             )
                                         }
 
-                                        // Chế độ NB2: Hiển thị danh sách thành viên có thể tick món này
-                                        if (
-                                            bill.mode == InputMode.NB2 &&
-                                            bill.nb2Permission.canSelectItem &&
-                                            !bill.isMergedParent &&
-                                            bill.mergedIntoBillId == null
-                                        ) {
-                                            Spacer(modifier = Modifier.height(8.dp))
-                                            Text("Ai ăn món này:", fontSize = 11.sp, color = TextMedium, fontWeight = FontWeight.SemiBold)
-                                            Spacer(modifier = Modifier.height(4.dp))
-
-                                            project?.memberIds?.forEach { memberId ->
-                                                val user = AppRepository.getUserById(memberId)
-                                                val isMe = memberId == currentUser.id
-                                                val isPayer = item.payerUserIds.contains(memberId)
-
-                                                Row(
-                                                    modifier = Modifier
-                                                        .fillMaxWidth()
-                                                        .padding(vertical = 2.dp),
-                                                    verticalAlignment = Alignment.CenterVertically
-                                                ) {
-                                                    Checkbox(
-                                                        checked = isPayer,
-                                                        onCheckedChange = { checked ->
-                                                            // Cập nhật danh sách người trả món này
-                                                            val newPayerIds = if (checked) {
-                                                                item.payerUserIds + memberId
-                                                            } else {
-                                                                item.payerUserIds - memberId
-                                                            }
-                                                            AppRepository.updateItemPayerUserIds(bill.id, item.id, newPayerIds)
-                                                        }
-                                                    )
-                                                    Text(
-                                                        text = if (isMe) "${user?.name} (Bạn)" else (user?.name ?: "N/A"),
-                                                        fontSize = 11.sp,
-                                                        color = if (isMe) PrimaryTealDark else TextDark
-                                                    )
-                                                }
-                                            }
-                                        }
-
-                                        // Chế độ NB2: Nút sửa món đồ nếu có quyền
-                                        if (
-                                            bill.mode == InputMode.NB2 &&
-                                            !bill.isMergedParent &&
-                                            bill.mergedIntoBillId == null
-                                        ) {
-                                            Spacer(modifier = Modifier.height(6.dp))
-                                            Row(
-                                                modifier = Modifier.fillMaxWidth(),
-                                                horizontalArrangement = Arrangement.End
-                                            ) {
-                                                if (bill.nb2Permission.canEditName || bill.nb2Permission.canEditQty || bill.nb2Permission.canEditPrice) {
-                                                    OutlinedButton(
-                                                        onClick = {
-                                                            editingItemId = item.id
-                                                            showNb2EditDialog = true
-                                                        },
-                                                        shape = RoundedCornerShape(8.dp),
-                                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                                                    ) {
-                                                        Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(14.dp))
-                                                        Spacer(modifier = Modifier.width(4.dp))
-                                                        Text("Sửa món", fontSize = 11.sp)
-                                                    }
-                                                }
-                                            }
+                                        val itemShares = item.sharesFor(
+                                            project?.memberIds ?: bill.memberStatuses.keys
+                                        )
+                                        Text("Người tham gia món:", fontSize = 11.sp, color = TextMedium)
+                                        itemShares.forEach { (memberId, amount) ->
+                                            Text(
+                                                "${AppRepository.getUserById(memberId)?.name ?: "Thành viên"}: ${AppRepository.formatCurrency(amount)}",
+                                                fontSize = 11.sp,
+                                                color = TextDark
+                                            )
                                         }
                                     }
                                 }
@@ -444,26 +388,42 @@ fun BillDetailScreen(
                                                 fontSize = 13.sp
                                             )
                                             Text(
-                                                text = if (status.isApproved) "☑️ Đã duyệt" else "⬜ Chưa duyệt",
+                                                text = if (bill.isMemberApproved(userId)) "☑️ Đã duyệt" else "⬜ Chưa duyệt",
                                                 fontSize = 10.sp,
-                                                color = if (status.isApproved) SuccessGreen else TextMedium
+                                                color = if (bill.isMemberApproved(userId)) SuccessGreen else TextMedium
                                             )
                                         }
                                     }
 
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         Text(
-                                            text = AppRepository.formatCurrency(status.amountOwed),
+                                            text = if (bill.debtObject == null || isMe) {
+                                                AppRepository.formatCurrency(status.amountOwed)
+                                            } else {
+                                                ""
+                                            },
                                             fontWeight = FontWeight.Bold,
                                             fontSize = 13.sp,
-                                            color = if (status.isPaid) SuccessGreen else ErrorRed
+                                            color = if (status.isCreatorConfirmed) SuccessGreen else ErrorRed
                                         )
+                                        if (
+                                            isMe &&
+                                            status.isPaid &&
+                                            !status.isCreatorConfirmed &&
+                                            bill.debtObject == null
+                                        ) {
+                                            Text(
+                                                "Chờ người ứng xác nhận",
+                                                fontSize = 9.sp,
+                                                color = TextMedium
+                                            )
+                                        }
 
                                         // Nút [👍 Bấm Duyệt phần của tôi] (Mục 1.9.4.2)
                                         if (
                                             isMe &&
-                                            !status.isApproved &&
-                                            (status.amountOwed == 0L || status.isCreatorConfirmed)
+                                            status.amountOwed > 0L &&
+                                            !bill.isMemberApproved(userId)
                                         ) {
                                             Spacer(modifier = Modifier.width(8.dp))
                                             Button(
@@ -472,7 +432,7 @@ fun BillDetailScreen(
                                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                                                 shape = RoundedCornerShape(6.dp)
                                             ) {
-                                                Text("👍 Duyệt phần tôi", fontSize = 10.sp)
+                                                Text("👍 Duyệt bill", fontSize = 10.sp)
                                             }
                                         }
                                     }
@@ -532,7 +492,7 @@ fun BillDetailScreen(
             // [MỤC 1.9.4.5] TAB ĐỐI SOÁT CỦA CHỦ BILL
             // Chỉ hiển thị khi Bạn là Người ứng tiền (currentUser.id == bill.creatorId)
             // ==========================================
-            if (isCurrentUserCreditor) {
+            if (isCurrentUserCreditor && bill.debtObject == null) {
                 item {
                     CreatorReconciliationSection(
                         bill = bill,
@@ -598,8 +558,8 @@ fun BillDetailScreen(
                 AppRepository.getUserById(userId) ?: User(userId, "Thành viên ${index + 1}", "", "", "", "")
             },
             onDismiss = { showEditBillDialog = false },
-            onSave = { updatedTitle, updatedItems ->
-                if (!AppRepository.saveBillEdits(bill.copy(title = updatedTitle, items = updatedItems))) {
+            onSave = { updatedBill ->
+                if (!AppRepository.saveBillEdits(updatedBill)) {
                     Toast.makeText(context, "Không thể lưu thay đổi bill.", Toast.LENGTH_LONG).show()
                 }
                 showEditBillDialog = false
@@ -616,26 +576,6 @@ fun BillDetailScreen(
         )
     }
 
-    // Dialog Chỉnh sửa món đồ NB2 (Mục 1.9.3 - thành viên sửa trực tiếp)
-    if (showNb2EditDialog && editingItemId != null) {
-        val itemToEdit = bill.items.firstOrNull { it.id == editingItemId }
-        if (itemToEdit != null) {
-            Nb2EditItemDialog(
-                item = itemToEdit,
-                nb2Permission = bill.nb2Permission,
-                onDismiss = { showNb2EditDialog = false; editingItemId = null },
-                onSave = { updatedItem ->
-                    AppRepository.saveBillEdits(
-                        bill.copy(
-                            items = bill.items.map { if (it.id == editingItemId) updatedItem else it }
-                        )
-                    )
-                    showNb2EditDialog = false
-                    editingItemId = null
-                }
-            )
-        }
-    }
 }
 
 // ==========================================
@@ -1123,7 +1063,9 @@ fun CreatorReconciliationSection(
 
             // Bảng danh sách các thành viên khác
             val debtorStatuses = bill.memberStatuses.filter {
-                (debtObjectName != null || it.key != creditorUserId) && it.value.amountOwed > 0L
+                (debtObjectName != null || it.key != creditorUserId) &&
+                    it.value.amountOwed > 0L &&
+                    (debtObjectName != null || bill.isMemberApproved(it.key))
             }
             val unpaidTotal = debtorStatuses.values.filterNot { it.isCreatorConfirmed }.sumOf { it.amountOwed }
             Text(
@@ -1163,69 +1105,80 @@ fun CreatorReconciliationSection(
 
                         Spacer(modifier = Modifier.height(6.dp))
 
-                        Row(
+                        Column(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            // Trạng thái Đã duyệt & Đã trả
-                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                StatusBadgeBox(
-                                    isCompleted = status.isApproved,
-                                    completedText = "Đã duyệt",
-                                    uncompletedText = "Chưa duyệt",
-                                    activeColor = SuccessGreen
-                                )
-                                StatusBadgeBox(
-                                    isCompleted = status.isPaid,
-                                    completedText = "Đã trả",
-                                    uncompletedText = "Chưa trả",
-                                    activeColor = PrimaryTeal
-                                )
-                            }
-
-                            // View proof and let the creditor accept or reject a reported payment.
                             Row(
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    StatusBadgeBox(
+                                        isCompleted = bill.isMemberApproved(userId),
+                                        completedText = "Đã duyệt",
+                                        uncompletedText = "Chưa duyệt",
+                                        activeColor = SuccessGreen
+                                    )
+                                    StatusBadgeBox(
+                                        isCompleted = status.isCreatorConfirmed,
+                                        completedText = "Đã trả",
+                                        uncompletedText = if (status.isPaid) "Chờ xác nhận" else "Chưa trả",
+                                        activeColor = PrimaryTeal
+                                    )
+                                }
                                 if (status.proofImageUri != null) {
                                     IconButton(
                                         onClick = { onViewProof(status.proofImageUri) },
-                                        modifier = Modifier.size(28.dp)
+                                        modifier = Modifier.size(32.dp)
                                     ) {
                                         Icon(Icons.Default.Visibility, contentDescription = "Xem ảnh", tint = PrimaryTeal)
                                     }
                                 }
+                            }
 
-                                if (debtObjectName != null) {
-                                    Text(
-                                        if (status.isCreatorConfirmed) "Người nợ đã xác nhận" else "Chờ người nợ thanh toán",
-                                        fontSize = 10.sp,
-                                        color = if (status.isCreatorConfirmed) SuccessGreen else TextMedium
-                                    )
-                                } else if (status.isCreatorConfirmed) {
-                                    Text("✅ Đã nhận", fontSize = 10.sp, color = SuccessGreen)
-                                } else if (status.isPaid) {
-                                    Column(horizontalAlignment = Alignment.End) {
-                                        Button(
-                                            onClick = { onConfirmUser(userId) },
-                                            colors = ButtonDefaults.buttonColors(containerColor = SuccessGreen),
-                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                            shape = RoundedCornerShape(6.dp)
-                                        ) {
-                                            Text("Xác nhận nhận", fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                                        }
-                                        TextButton(
-                                            onClick = { onRejectUser(userId) },
-                                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
-                                        ) {
-                                            Text("Từ chối, yêu cầu gửi lại", fontSize = 10.sp, color = ErrorRed)
-                                        }
+                            when {
+                                debtObjectName != null -> Text(
+                                    if (status.isCreatorConfirmed) "Người nợ đã xác nhận" else "Chờ người nợ thanh toán",
+                                    modifier = Modifier.fillMaxWidth(),
+                                    fontSize = 10.sp,
+                                    color = if (status.isCreatorConfirmed) SuccessGreen else TextMedium
+                                )
+                                status.isCreatorConfirmed -> Text(
+                                    "✅ Đã nhận",
+                                    modifier = Modifier.fillMaxWidth(),
+                                    fontSize = 10.sp,
+                                    color = SuccessGreen
+                                )
+                                status.isPaid -> {
+                                    Button(
+                                        onClick = { onConfirmUser(userId) },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        colors = ButtonDefaults.buttonColors(containerColor = SuccessGreen),
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                                        shape = RoundedCornerShape(6.dp)
+                                    ) {
+                                        Text("Xác nhận đã nhận tiền", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                                     }
-                                } else {
-                                    Text("Chưa báo đã trả", fontSize = 10.sp, color = TextMedium)
+                                    TextButton(
+                                        onClick = { onRejectUser(userId) },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                                    ) {
+                                        Text(
+                                            "Từ chối, yêu cầu gửi lại",
+                                            fontSize = 11.sp,
+                                            color = ErrorRed
+                                        )
+                                    }
                                 }
+                                else -> Text(
+                                    "Chưa báo đã trả",
+                                    modifier = Modifier.fillMaxWidth(),
+                                    fontSize = 10.sp,
+                                    color = TextMedium
+                                )
                             }
                         }
                     }
@@ -1243,31 +1196,37 @@ fun EditBillDialog(
     bill: Bill,
     participants: List<User>,
     onDismiss: () -> Unit,
-    onSave: (String, List<BillItem>) -> Unit
+    onSave: (Bill) -> Unit
 ) {
     var title by remember { mutableStateOf(bill.title) }
+    var mode by remember { mutableStateOf(bill.mode) }
+    var advanceUserId by remember { mutableStateOf(bill.advanceUserId) }
     var items by remember { mutableStateOf(bill.items) }
     var newItemName by remember { mutableStateOf("") }
     var newItemQuantity by remember { mutableStateOf("") }
     var newItemPrice by remember { mutableStateOf("") }
     var validationMessage by remember { mutableStateOf<String?>(null) }
+    val participantIds = participants.map { it.id }
     val validItems = items.all {
-        it.name.isNotBlank() && it.quantity > 0 && it.unitPrice > 0L
+        it.name.isNotBlank() &&
+            it.quantity > 0 &&
+            it.unitPrice > 0L &&
+            it.hasValidSharesFor(participantIds)
     } && items.isNotEmpty()
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Chỉnh sửa thông tin Bill", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
+        title = { Text("Chỉnh sửa bill", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
         text = {
             Column(
                 modifier = Modifier
-                    .heightIn(max = 420.dp)
+                    .heightIn(max = 520.dp)
                     .verticalScroll(rememberScrollState())
                     .imePadding(),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text(
-                    "Chỉnh sửa sẽ cập nhật lại phần chia và đưa trạng thái duyệt/thanh toán về chưa xác nhận.",
+                    "Người tạo và thành viên NB2 dùng chung màn hình này. Lưu sẽ tính lại phần chia và trạng thái thanh toán.",
                     fontSize = 12.sp,
                     color = TextMedium
                 )
@@ -1279,6 +1238,42 @@ fun EditBillDialog(
                     colors = BillInputFieldColors(),
                     singleLine = true
                 )
+                Text("Quyền chỉnh sửa", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = mode == InputMode.NB1,
+                        onClick = { mode = InputMode.NB1 },
+                        label = { Text("Chỉ người tạo") }
+                    )
+                    FilterChip(
+                        selected = mode == InputMode.NB2,
+                        onClick = { mode = InputMode.NB2 },
+                        label = { Text("Cả nhóm") }
+                    )
+                }
+                Text("Ai ứng tiền bill?", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                participants.forEach { participant ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = advanceUserId == participant.id,
+                            onClick = { advanceUserId = participant.id }
+                        )
+                        Text(participant.name, fontSize = 12.sp)
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(
+                        selected = advanceUserId == null,
+                        onClick = { advanceUserId = null }
+                    )
+                    Text("Không ai ứng", fontSize = 12.sp)
+                }
                 items.forEachIndexed { index, item ->
                     Card(
                         modifier = Modifier.fillMaxWidth(),
@@ -1320,7 +1315,10 @@ fun EditBillDialog(
                                     onValueChange = { value ->
                                         val quantity = value.filter(Char::isDigit).toIntOrNull() ?: 0
                                         items = items.mapIndexed { itemIndex, current ->
-                                            if (itemIndex == index) current.copy(quantity = quantity) else current
+                                            if (itemIndex == index) current.copy(
+                                                quantity = quantity,
+                                                payerAmounts = emptyMap()
+                                            ) else current
                                         }
                                     },
                                     label = { Text("Số lượng") },
@@ -1333,7 +1331,10 @@ fun EditBillDialog(
                                     onValueChange = { value ->
                                         val price = value.filter(Char::isDigit).toLongOrNull() ?: 0L
                                         items = items.mapIndexed { itemIndex, current ->
-                                            if (itemIndex == index) current.copy(unitPrice = price) else current
+                                            if (itemIndex == index) current.copy(
+                                                unitPrice = price,
+                                                payerAmounts = emptyMap()
+                                            ) else current
                                         }
                                     },
                                     label = { Text("Đơn giá (VNĐ)") },
@@ -1342,36 +1343,16 @@ fun EditBillDialog(
                                     singleLine = true
                                 )
                             }
-                            Text(
-                                "Người chia món:",
-                                fontSize = 11.sp,
-                                color = TextMedium,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            val selectedPayers = item.payerUserIds.ifEmpty { participants.map { it.id } }
-                            participants.forEach { participant ->
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Checkbox(
-                                        checked = participant.id in selectedPayers,
-                                        onCheckedChange = { checked ->
-                                            if (checked || selectedPayers.size > 1) {
-                                                val nextPayers = if (checked) {
-                                                    (selectedPayers + participant.id).distinct()
-                                                } else {
-                                                    selectedPayers - participant.id
-                                                }
-                                                items = items.mapIndexed { itemIndex, current ->
-                                                    if (itemIndex == index) current.copy(payerUserIds = nextPayers) else current
-                                                }
-                                            }
-                                        }
-                                    )
-                                    Text(participant.name, fontSize = 12.sp)
+                            BillItemAllocationEditor(
+                                item = item,
+                                participants = participants,
+                                onItemChange = { updatedItem ->
+                                    items = items.mapIndexed { itemIndex, current ->
+                                        if (itemIndex == index) updatedItem else current
+                                    }
+                                    validationMessage = null
                                 }
-                            }
+                            )
                         }
                     }
                 }
@@ -1415,7 +1396,7 @@ fun EditBillDialog(
                                     name = newItemName.trim(),
                                     quantity = quantity,
                                     unitPrice = price,
-                                    payerUserIds = participants.map { it.id }
+                                    payerUserIds = participantIds
                                 )
                                 newItemName = ""
                                 newItemQuantity = ""
@@ -1435,12 +1416,33 @@ fun EditBillDialog(
                     fontWeight = FontWeight.Bold,
                     color = PrimaryTealDark
                 )
+                if (!validItems) {
+                    Text(
+                        "Kiểm tra tên, số lượng, đơn giá và bảo đảm tổng phần mỗi món bằng giá món.",
+                        color = ErrorRed,
+                        fontSize = 12.sp
+                    )
+                }
                 validationMessage?.let { Text(it, color = ErrorRed, fontSize = 12.sp) }
             }
         },
         confirmButton = {
             Button(
-                onClick = { onSave(title, items) },
+                onClick = {
+                    onSave(
+                        bill.copy(
+                            title = title.trim(),
+                            mode = mode,
+                            advanceUserId = advanceUserId,
+                            debtObject = if (advanceUserId == null) {
+                                bill.debtObject ?: BillDebtObject(ownerUserId = bill.creatorId)
+                            } else {
+                                null
+                            },
+                            items = items
+                        )
+                    )
+                },
                 enabled = title.isNotBlank() && validItems,
                 colors = ButtonDefaults.buttonColors(containerColor = PrimaryTeal)
             ) {

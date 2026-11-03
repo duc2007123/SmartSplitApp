@@ -1,6 +1,10 @@
 package com.smartsplit.app.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -10,6 +14,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.core.content.ContextCompat
 import com.smartsplit.app.ui.theme.SmartSplitAppTheme
 
 // ==========================================
@@ -27,6 +32,9 @@ sealed class Screen {
 // [MAIN ACTIVITY] ĐIỀU HƯỚNG NỐI TOÀN BỘ CÁC MÀN HÌNH TỪ 1.1 ĐẾN 1.9.5
 // ==========================================
 class MainActivity : ComponentActivity() {
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -34,6 +42,13 @@ class MainActivity : ComponentActivity() {
         // [YÊU CẦU KỸ THUẬT #3] Khởi tạo NotificationHelper và AppRepository
         com.smartsplit.app.data.AppRepository.init(this)
         com.smartsplit.app.data.AppRepository.restoreAuthenticatedSession()
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
 
         setContent {
             SmartSplitAppTheme {

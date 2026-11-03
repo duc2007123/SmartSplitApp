@@ -226,6 +226,9 @@ class AppDataDatabaseHelper(context: Context) :
                     put("quantity", item.quantity)
                     put("unitPrice", item.unitPrice)
                     put("payerUserIds", JSONArray(item.payerUserIds))
+                    put("payerAmounts", JSONObject().apply {
+                        item.payerAmounts.forEach { (userId, amount) -> put(userId, amount) }
+                    })
                 })
             }
         })
@@ -236,6 +239,7 @@ class AppDataDatabaseHelper(context: Context) :
                     put("itemCount", status.itemCount)
                     put("amountOwed", status.amountOwed)
                     put("isApproved", status.isApproved)
+                    put("hasExplicitApproval", status.hasExplicitApproval)
                     put("isPaid", status.isPaid)
                     putNullable("proofImageUri", status.proofImageUri)
                     put("isCreatorConfirmed", status.isCreatorConfirmed)
@@ -299,15 +303,13 @@ class AppDataDatabaseHelper(context: Context) :
             while (keys.hasNext()) {
                 val key = keys.next()
                 val status = statuses.getJSONObject(key)
-                val amountOwed = status.optLong("amountOwed", 0L)
                 val isCreatorConfirmed = status.optBoolean("isCreatorConfirmed", false)
-                val hasDebtObject = json.optJSONObject("debtObject") != null
                 put(key, MemberBillStatus(
                     userId = status.optString("userId", key),
                     itemCount = status.optInt("itemCount", 0),
-                    amountOwed = amountOwed,
-                    isApproved = status.optBoolean("isApproved", false) &&
-                        (hasDebtObject || amountOwed == 0L || isCreatorConfirmed),
+                    amountOwed = status.optLong("amountOwed", 0L),
+                    isApproved = status.optBoolean("isApproved", false),
+                    hasExplicitApproval = status.optBoolean("hasExplicitApproval", false),
                     isPaid = status.optBoolean("isPaid", false),
                     proofImageUri = status.optNullableString("proofImageUri"),
                     isCreatorConfirmed = isCreatorConfirmed
@@ -351,12 +353,20 @@ class AppDataDatabaseHelper(context: Context) :
             items = buildList {
                 for (index in 0 until itemArray.length()) {
                     val item = itemArray.getJSONObject(index)
+                    val payerAmounts = item.optJSONObject("payerAmounts") ?: JSONObject()
                     add(BillItem(
                         id = item.getString("id"),
                         name = item.getString("name"),
                         quantity = item.optInt("quantity", 1),
                         unitPrice = item.optLong("unitPrice", 0L),
-                        payerUserIds = (item.optJSONArray("payerUserIds") ?: JSONArray()).toStringList()
+                        payerUserIds = (item.optJSONArray("payerUserIds") ?: JSONArray()).toStringList(),
+                        payerAmounts = buildMap {
+                            val keys = payerAmounts.keys()
+                            while (keys.hasNext()) {
+                                val userId = keys.next()
+                                put(userId, payerAmounts.optLong(userId, 0L))
+                            }
+                        }
                     ))
                 }
             },

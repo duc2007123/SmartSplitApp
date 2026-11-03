@@ -39,7 +39,19 @@ service cloud.firestore {
       }
 
       match /notifications/{notificationId} {
-        allow read, create, update, delete: if signedIn() && request.auth.uid == userId;
+        allow read, delete: if signedIn() && request.auth.uid == userId;
+        allow create: if signedIn() && (
+          request.auth.uid == userId
+          || (
+            request.resource.data.senderUserId == request.auth.uid
+            && request.resource.data.projectId is string
+            && isMember(request.resource.data.projectId)
+            && userId in get(
+              /databases/$(database)/documents/projects/$(request.resource.data.projectId)
+            ).data.memberIds
+          )
+        );
+        allow update: if false;
       }
     }
 

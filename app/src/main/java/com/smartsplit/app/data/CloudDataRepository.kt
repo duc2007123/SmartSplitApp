@@ -53,10 +53,12 @@ class CloudDataRepository(
         onProjects: (List<Project>) -> Unit,
         onBills: (List<Bill>) -> Unit,
         onUsers: (List<User>) -> Unit,
-        onNotifications: (List<AppNotification>) -> Unit
+        onNotifications: (List<AppNotification>) -> Unit,
+        onIncomingNotification: (AppNotification) -> Unit
     ) {
         stopListening()
         activeUserId = userId
+        var hasLoadedNotifications = false
 
         listeners += firestore.collection("users").document(userId)
             .addSnapshotListener { snapshot, error ->
@@ -74,16 +76,47 @@ class CloudDataRepository(
                 if (error != null) {
                     onError("Không thể đồng bộ thông báo: ${error.localizedMessage}")
                 } else {
-                    onNotifications(snapshot?.documents.orEmpty().mapNotNull { document ->
+                    val documents = snapshot?.documents.orEmpty()
+                    onNotifications(documents.mapNotNull { document ->
                         val title = document.getString("title") ?: return@mapNotNull null
                         val message = document.getString("message") ?: return@mapNotNull null
                         AppNotification(
                             id = document.id,
                             title = title,
                             message = message,
-                            timestamp = document.getLong("timestamp") ?: 0L
+                            timestamp = document.getLong("timestamp") ?: 0L,
+                            senderUserId = document.getString("senderUserId"),
+                            projectId = document.getString("projectId")
                         )
                     }.sortedByDescending(AppNotification::timestamp).take(20))
+                    if (hasLoadedNotifications) {
+                        snapshot?.documentChanges
+                            ?.filter { it.type == com.google.firebase.firestore.DocumentChange.Type.ADDED }
+                            ?.forEach { change ->
+                                val senderUserId = change.document.getString("senderUserId")
+                                val title = change.document.getString("title")
+                                val message = change.document.getString("message")
+                                if (
+                                    senderUserId != null &&
+                                    senderUserId != userId &&
+                                    title != null &&
+                                    message != null
+                                ) {
+                                    onIncomingNotification(
+                                        AppNotification(
+                                            id = change.document.id,
+                                            title = title,
+                                            message = message,
+                                            timestamp = change.document.getLong("timestamp") ?: 0L,
+                                            senderUserId = senderUserId,
+                                            projectId = change.document.getString("projectId")
+                                        )
+                                    )
+                                }
+                            }
+                    } else {
+                        hasLoadedNotifications = true
+                    }
                 }
             }
 
@@ -185,17 +218,23 @@ class CloudDataRepository(
 
     fun saveNotification(notification: AppNotification) {
         val userId = activeUserId ?: return
+        saveNotification(userId, notification)
+    }
+
+    fun saveNotification(recipientUserId: String, notification: AppNotification) {
+        if (activeUserId == null) return
         scope.launch {
             try {
-                firestore.collection("users").document(userId)
+                val data = mutableMapOf<String, Any>(
+                    "title" to notification.title,
+                    "message" to notification.message,
+                    "timestamp" to notification.timestamp
+                )
+                notification.senderUserId?.let { data["senderUserId"] = it }
+                notification.projectId?.let { data["projectId"] = it }
+                firestore.collection("users").document(recipientUserId)
                     .collection("notifications").document(notification.id)
-                    .set(
-                        mapOf(
-                            "title" to notification.title,
-                            "message" to notification.message,
-                            "timestamp" to notification.timestamp
-                        )
-                    ).await()
+                    .set(data).await()
             } catch (error: Exception) {
                 onError("Không thể đồng bộ thông báo: ${error.localizedMessage}")
             }

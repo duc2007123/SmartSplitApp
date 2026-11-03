@@ -32,6 +32,8 @@ import com.smartsplit.app.data.Nb2Permission
 import com.smartsplit.app.data.Project
 import com.smartsplit.app.data.User
 import com.smartsplit.app.data.unpaidAmountFor
+import com.smartsplit.app.data.sharesFor
+import com.smartsplit.app.data.hasValidSharesFor
 import com.smartsplit.app.ui.theme.*
 import android.widget.Toast
 
@@ -78,15 +80,36 @@ fun ProjectDetailScreen(
     var dateFilter by remember { mutableStateOf<String?>(null) } // Lọc theo ngày tháng
     var showDatePickerDialog by remember { mutableStateOf(false) }
     var showUnpaidBillsDialog by remember { mutableStateOf(false) }
+    var selectedMergeBillIds by remember(projectId) { mutableStateOf<Set<String>?>(null) }
+    var previousEligibleMergeBillIds by remember(projectId) { mutableStateOf<Set<String>>(emptySet()) }
 
     // State hiển thị Dialog
     var showCreateBillDialog by remember { mutableStateOf(false) }
     var billPendingDeletion by remember { mutableStateOf<Bill?>(null) }
 
     // Tính toán số bill đủ điều kiện gộp (Mục 1.9.5)
-    val eligibleMergeBills = projectBills.filter {
-        !it.isMergedParent && it.mergedIntoBillId == null && it.isAllApproved && !it.isAllPaid
+    val eligibleMergeBills = projectBills.filter { bill ->
+        !bill.isMergedParent &&
+            bill.mergedIntoBillId == null &&
+            bill.debtObject == null &&
+            bill.isAllApproved &&
+            !bill.isAllPaid &&
+            bill.memberStatuses.values.any { it.amountOwed > 0L && !it.isCreatorConfirmed }
     }
+    val eligibleMergeBillIds = eligibleMergeBills.mapTo(linkedSetOf()) { it.id }
+    LaunchedEffect(eligibleMergeBillIds) {
+        val selectedIds = selectedMergeBillIds
+        selectedMergeBillIds = if (selectedIds == null) {
+            eligibleMergeBillIds
+        } else {
+            (selectedIds intersect eligibleMergeBillIds) +
+                (eligibleMergeBillIds - previousEligibleMergeBillIds)
+        }
+        previousEligibleMergeBillIds = eligibleMergeBillIds
+    }
+    val selectedEligibleMergeBillIds = selectedMergeBillIds
+        ?.intersect(eligibleMergeBillIds)
+        ?: eligibleMergeBillIds
 
     Scaffold(
         topBar = {
@@ -232,11 +255,80 @@ fun ProjectDetailScreen(
                         Spacer(modifier = Modifier.height(6.dp))
 
                         Text(
-                            text = "Hiện có ${eligibleMergeBills.size} bill đã duyệt đang chờ gộp. Thuật toán Minimum Cash Flow sẽ triệt tiêu nợ chéo để rút gọn còn số lần chuyển ít nhất!",
+                            text = "Chọn các bill còn khoản chưa thanh toán để gộp. Mặc định tất cả bill đủ điều kiện được chọn; bill đã thanh toán hết sẽ không xuất hiện.",
                             fontSize = 12.sp,
                             color = TextMedium,
                             lineHeight = 16.sp
                         )
+
+                        if (eligibleMergeBills.isNotEmpty()) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        selectedMergeBillIds =
+                                            if (selectedEligibleMergeBillIds.size == eligibleMergeBills.size) {
+                                                emptySet()
+                                            } else {
+                                                eligibleMergeBillIds
+                                            }
+                                    }
+                                    .padding(vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(
+                                    checked = selectedEligibleMergeBillIds.size == eligibleMergeBills.size,
+                                    onCheckedChange = { checked ->
+                                        selectedMergeBillIds =
+                                            if (checked) eligibleMergeBillIds else emptySet()
+                                    }
+                                )
+                                Text(
+                                    if (selectedEligibleMergeBillIds.size == eligibleMergeBills.size) {
+                                        "Bỏ chọn tất cả"
+                                    } else {
+                                        "Chọn tất cả (${eligibleMergeBills.size})"
+                                    },
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                            eligibleMergeBills.forEach { bill ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            val selected = selectedEligibleMergeBillIds
+                                            selectedMergeBillIds = if (bill.id in selected) {
+                                                selected - bill.id
+                                            } else {
+                                                selected + bill.id
+                                            }
+                                        }
+                                        .padding(vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Checkbox(
+                                        checked = bill.id in selectedEligibleMergeBillIds,
+                                        onCheckedChange = { checked ->
+                                            selectedMergeBillIds = if (checked) {
+                                                selectedEligibleMergeBillIds + bill.id
+                                            } else {
+                                                selectedEligibleMergeBillIds - bill.id
+                                            }
+                                        }
+                                    )
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(bill.title, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                                        Text(
+                                            "${AppRepository.formatCurrency(bill.totalAmount)} • Có người ứng",
+                                            fontSize = 10.sp,
+                                            color = TextMedium
+                                        )
+                                    }
+                                }
+                            }
+                        }
 
                         Spacer(modifier = Modifier.height(10.dp))
 
@@ -244,21 +336,28 @@ fun ProjectDetailScreen(
                         Button(
                             onClick = {
                                 // Bước 1: Thực thi thuật toán gộp các bill đã duyệt trong AppRepository
-                                val mergedBill = AppRepository.mergeApprovedBills(projectId)
+                                val mergedBill = AppRepository.mergeApprovedBills(
+                                    projectId,
+                                    selectedEligibleMergeBillIds
+                                )
                                 if (mergedBill != null) {
                                     // Tự động mở chi tiết Bill Gộp mới vừa tạo
                                     onNavigateToBill(mergedBill.id)
                                 }
                             },
                             modifier = Modifier.fillMaxWidth(),
-                            enabled = eligibleMergeBills.size >= 2, // [SỬA NHANH KHI VẤN ĐÁP] Cần tối thiểu 2 bill đã duyệt để gộp
+                            enabled = selectedEligibleMergeBillIds.size >= 2,
                             colors = ButtonDefaults.buttonColors(containerColor = SecondaryIndigo),
                             shape = RoundedCornerShape(10.dp)
                         ) {
                             Icon(Icons.Default.MergeType, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = if (eligibleMergeBills.size >= 2) "🔄 Gộp ${eligibleMergeBills.size} Bill Đã Duyệt ngay" else "Cần ít nhất 2 bill đã duyệt để gộp",
+                                text = if (selectedEligibleMergeBillIds.size >= 2) {
+                                    "🔄 Gộp ${selectedEligibleMergeBillIds.size} bill đã chọn"
+                                } else {
+                                    "Chọn ít nhất 2 bill chưa thanh toán"
+                                },
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 13.sp
                             )
@@ -416,12 +515,23 @@ fun ProjectDetailScreen(
                         bill = bill,
                         alpha = cardAlpha,
                         isMergedOldBill = isMergedOldBill,
+                        currentUserId = currentUser.id,
                         onDelete = if (
                             bill.creatorId == currentUser.id &&
                             !bill.isMergedParent &&
                             bill.mergedIntoBillId == null
                         ) {
                             { billPendingDeletion = bill }
+                        } else {
+                            null
+                        },
+                        onApproveCurrentUser = if (
+                            !bill.isMergedParent &&
+                            bill.mergedIntoBillId == null &&
+                            (bill.memberStatuses[currentUser.id]?.amountOwed ?: 0L) > 0L &&
+                            !bill.isMemberApproved(currentUser.id)
+                        ) {
+                            { AppRepository.approveMemberPortion(bill.id, currentUser.id) }
                         } else {
                             null
                         },
@@ -513,7 +623,9 @@ fun BillCardItem(
     bill: Bill,
     alpha: Float,
     isMergedOldBill: Boolean,
+    currentUserId: String,
     onDelete: (() -> Unit)? = null,
+    onApproveCurrentUser: (() -> Unit)? = null,
     onClick: () -> Unit
 ) {
     val advanceUser = bill.advanceUserId?.let(AppRepository::getUserById)
@@ -658,10 +770,12 @@ fun BillCardItem(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     // Ô 1: Trạng thái Đã duyệt
                     StatusBadgeBox(
-                        isCompleted = bill.isAllApproved,
+                        isCompleted = bill.isMemberApproved(currentUserId),
                         completedText = "☑️ Đã duyệt",
                         uncompletedText = "⬜ Chưa duyệt",
-                        activeColor = SuccessGreen
+                        activeColor = SuccessGreen,
+                        onClick = onApproveCurrentUser,
+                        modifier = Modifier.width(92.dp)
                     )
 
                     // Ô 2: Trạng thái Đã trả
@@ -669,7 +783,8 @@ fun BillCardItem(
                         isCompleted = bill.isAllPaid,
                         completedText = "☑️ Đã trả",
                         uncompletedText = "⏳ Chưa trả",
-                        activeColor = PrimaryTeal
+                        activeColor = PrimaryTeal,
+                        modifier = Modifier.width(92.dp)
                     )
                 }
             }
@@ -694,9 +809,14 @@ fun StatusBadgeBox(
     isCompleted: Boolean,
     completedText: String,
     uncompletedText: String,
-    activeColor: Color
+    activeColor: Color,
+    onClick: (() -> Unit)? = null,
+    modifier: Modifier = Modifier
 ) {
     Surface(
+        modifier = modifier.then(
+            if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
+        ),
         color = if (isCompleted) activeColor.copy(alpha = 0.15f) else Color.LightGray.copy(alpha = 0.2f),
         shape = RoundedCornerShape(8.dp),
         border = if (isCompleted) CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(activeColor)) else null
@@ -706,7 +826,8 @@ fun StatusBadgeBox(
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold,
             color = if (isCompleted) activeColor else TextMedium,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center
         )
     }
 }
@@ -732,17 +853,61 @@ fun CreateBillDialog(
         )
     }
     var autoSelectAdvanceUser by remember(project.id) { mutableStateOf(true) }
-    var selectedParticipantIds by remember(project.id, project.memberIds) {
-        mutableStateOf(project.memberIds.toSet())
+    var billTitle by remember { mutableStateOf("") }
+    var billDate by remember { mutableLongStateOf(todayBillDateMillis()) }
+    var showBillDatePicker by remember { mutableStateOf(false) }
+    val billDatePickerState = rememberDatePickerState(initialSelectedDateMillis = billDate)
+    var inputMethod by remember { mutableStateOf("Nhập tay") }
+    var showVoiceBillInput by remember(project.id) { mutableStateOf(false) }
+    var showReceiptBillInput by remember(project.id) { mutableStateOf(false) }
+
+    // Danh sách món đồ
+    var itemName by remember { mutableStateOf("") }
+    var itemQty by remember { mutableStateOf("") }
+    var itemPrice by remember { mutableStateOf("") }
+    var savedItems by remember { mutableStateOf(emptyList<BillItem>()) }
+    var draftAllocation by remember(project.id) {
+        mutableStateOf(
+            BillItem(
+                name = "",
+                unitPrice = 0L,
+                payerUserIds = project.memberIds
+            )
+        )
     }
+    var inputError by remember { mutableStateOf<String?>(null) }
+    val draftQuantity = itemQty.toIntOrNull() ?: 0
+    val draftPrice = itemPrice.toLongOrNull() ?: 0L
+    val draftTotal = draftQuantity.toLong() * draftPrice
+    val draftItem = if (
+        itemName.isNotBlank() && draftQuantity > 0 && draftPrice > 0L
+    ) {
+        draftAllocation.copy(
+            name = itemName.trim(),
+            quantity = draftQuantity,
+            unitPrice = draftPrice,
+            payerAmounts = if (draftAllocation.totalPrice == draftTotal) {
+                draftAllocation.payerAmounts
+            } else {
+                emptyMap()
+            }
+        )
+    } else {
+        null
+    }
+    val totalEstimated = savedItems.sumOf { it.totalPrice } + (draftItem?.totalPrice ?: 0L)
+    val participatingIds = savedItems
+        .flatMap { item -> item.payerUserIds.ifEmpty { project.memberIds } }
+        .toSet()
+        .ifEmpty { project.memberIds.toSet() }
     val automaticAdvanceUserId = remember(
         project.id,
         project.memberIds,
-        selectedParticipantIds,
+        savedItems,
         allBills,
         currentUser.id
     ) {
-        val participantDebts = selectedParticipantIds.associateWith { memberId ->
+        val participantDebts = participatingIds.associateWith { memberId ->
             allBills.asSequence()
                 .filter { it.projectId == project.id }
                 .sumOf { it.unpaidAmountFor(memberId) }
@@ -761,48 +926,7 @@ fun CreateBillDialog(
     val advanceUserId = if (autoSelectAdvanceUser) {
         automaticAdvanceUserId
     } else {
-        manualAdvanceUserId?.takeIf { it in selectedParticipantIds }
-    }
-    var billTitle by remember { mutableStateOf("") }
-    var billDate by remember { mutableLongStateOf(todayBillDateMillis()) }
-    var showBillDatePicker by remember { mutableStateOf(false) }
-    val billDatePickerState = rememberDatePickerState(initialSelectedDateMillis = billDate)
-    var inputMethod by remember { mutableStateOf("Nhập tay") } // Chụp ảnh AI, Giọng nói AI, Nhập tay
-
-    // Danh sách món đồ
-    var itemName by remember { mutableStateOf("") }
-    var itemQty by remember { mutableStateOf("") }
-    var itemPrice by remember { mutableStateOf("") }
-    var savedItems by remember { mutableStateOf(emptyList<BillItem>()) }
-    var inputError by remember { mutableStateOf<String?>(null) }
-    val draftItem = remember(itemName, itemQty, itemPrice, selectedParticipantIds) {
-        val quantity = itemQty.toIntOrNull()
-        val price = itemPrice.toLongOrNull()
-        if (itemName.isNotBlank() && quantity != null && quantity > 0 && price != null && price > 0L) {
-            BillItem(
-                name = itemName.trim(),
-                quantity = quantity,
-                unitPrice = price,
-                payerUserIds = project.memberIds.filter { it in selectedParticipantIds }
-            )
-        } else {
-            null
-        }
-    }
-
-    // Điều chỉnh số tiền từng người (Mục 1.9.3 - Mặc định chia đều nhưng có thể chỉnh)
-    var customSplitEnabled by remember { mutableStateOf(false) }
-    val totalEstimated = savedItems.sumOf { it.totalPrice } + (draftItem?.totalPrice ?: 0L)
-    val memberAmounts = remember(totalEstimated, project.memberIds, selectedParticipantIds) {
-        mutableStateMapOf<String, String>().apply {
-            val participants = project.memberIds.filter { it in selectedParticipantIds }
-            val baseAmount = if (participants.isNotEmpty()) totalEstimated / participants.size else 0L
-            val remainder = if (participants.isNotEmpty()) totalEstimated % participants.size else 0L
-            project.memberIds.forEach { this[it] = "0" }
-            participants.forEachIndexed { index, memberId ->
-                this[memberId] = (baseAmount + if (index < remainder) 1L else 0L).toString()
-            }
-        }
+        manualAdvanceUserId?.takeIf { it in participatingIds }
     }
 
     AlertDialog(
@@ -847,61 +971,21 @@ fun CreateBillDialog(
                         modifier = Modifier.fillMaxWidth(),
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        listOf("📷 Chụp ảnh OCR", "🎤 Giọng nói AI", "✍️ Nhập tay").forEach { method ->
+                        listOf("📷 Chụp ảnh OCR", "🎤 Giọng nói", "✍️ Nhập tay").forEach { method ->
                             FilterChip(
                                 selected = inputMethod == method,
                                 onClick = {
                                     inputMethod = method
+                                    showReceiptBillInput = false
+                                    showVoiceBillInput = false
+                                    when (method) {
+                                        "📷 Chụp ảnh OCR" -> showReceiptBillInput = true
+                                        "🎤 Giọng nói" -> showVoiceBillInput = true
+                                    }
                                 },
                                 label = { Text(method, fontSize = 12.sp) },
                                 modifier = Modifier.fillMaxWidth()
                             )
-                        }
-                    }
-                }
-
-                item {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = SurfaceWhite),
-                        border = CardDefaults.outlinedCardBorder()
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Text("Ai tham gia bill này?", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                            Text("Mặc định tất cả thành viên đều được chọn.", fontSize = 11.sp, color = TextMedium)
-                            project.memberIds.forEach { memberId ->
-                                val member = AppRepository.getUserById(memberId)
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable {
-                                            selectedParticipantIds =
-                                                if (memberId in selectedParticipantIds) {
-                                                    selectedParticipantIds - memberId
-                                                } else {
-                                                    selectedParticipantIds + memberId
-                                                }
-                                        },
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Checkbox(
-                                        checked = memberId in selectedParticipantIds,
-                                        onCheckedChange = { checked ->
-                                            selectedParticipantIds =
-                                                if (checked) selectedParticipantIds + memberId
-                                                else selectedParticipantIds - memberId
-                                        }
-                                    )
-                                    Text(
-                                        if (memberId == currentUser.id) "${member?.name ?: "Bạn"} (bạn)"
-                                        else member?.name ?: "Thành viên",
-                                        fontSize = 13.sp
-                                    )
-                                }
-                            }
                         }
                     }
                 }
@@ -944,7 +1028,7 @@ fun CreateBillDialog(
                                     color = TextMedium
                                 )
                             } else {
-                                project.memberIds.filter { it in selectedParticipantIds }.forEach { memberId ->
+                                project.memberIds.filter { it in participatingIds }.forEach { memberId ->
                                     val member = AppRepository.getUserById(memberId)
                                     Row(
                                         modifier = Modifier
@@ -1032,24 +1116,39 @@ fun CreateBillDialog(
                             colors = CardDefaults.cardColors(containerColor = SurfaceWhite),
                             border = CardDefaults.outlinedCardBorder()
                         ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(savedItem.name, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-                                    Text(
-                                        "${savedItem.quantity} × ${AppRepository.formatCurrency(savedItem.unitPrice)} = ${AppRepository.formatCurrency(savedItem.totalPrice)}",
-                                        fontSize = 11.sp,
-                                        color = TextMedium
-                                    )
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(savedItem.name, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                                        Text(
+                                            "${savedItem.quantity} × ${AppRepository.formatCurrency(savedItem.unitPrice)} = ${AppRepository.formatCurrency(savedItem.totalPrice)}",
+                                            fontSize = 11.sp,
+                                            color = TextMedium
+                                        )
+                                    }
+                                    IconButton(onClick = {
+                                        savedItems = savedItems.filterIndexed { itemIndex, _ -> itemIndex != index }
+                                        inputError = null
+                                    }) {
+                                        Icon(Icons.Default.Delete, contentDescription = "Xóa món", tint = ErrorRed)
+                                    }
                                 }
-                                IconButton(onClick = {
-                                    savedItems = savedItems.filterIndexed { itemIndex, _ -> itemIndex != index }
-                                    inputError = null
-                                }) {
-                                    Icon(Icons.Default.Delete, contentDescription = "Xóa món", tint = ErrorRed)
-                                }
+                                BillItemAllocationEditor(
+                                    item = savedItem,
+                                    participants = project.memberIds.mapIndexed { index, id ->
+                                        AppRepository.getUserById(id)
+                                            ?: User(id, "Thành viên ${index + 1}", "", "", "", "")
+                                    },
+                                    onItemChange = { updatedItem ->
+                                        savedItems = savedItems.map { current ->
+                                            if (current.id == updatedItem.id) updatedItem else current
+                                        }
+                                        inputError = null
+                                    }
+                                )
                             }
                         }
                     }
@@ -1094,6 +1193,32 @@ fun CreateBillDialog(
                     )
                 }
 
+                if (draftItem != null) {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = SurfaceWhite),
+                            border = CardDefaults.outlinedCardBorder()
+                        ) {
+                            Column(modifier = Modifier.padding(10.dp)) {
+                                Text(
+                                    "Chia món mới: ${draftItem.name}",
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 12.sp
+                                )
+                                BillItemAllocationEditor(
+                                    item = draftItem,
+                                    participants = project.memberIds.mapIndexed { index, id ->
+                                        AppRepository.getUserById(id)
+                                            ?: User(id, "Thành viên ${index + 1}", "", "", "", "")
+                                    },
+                                    onItemChange = { draftAllocation = it }
+                                )
+                            }
+                        }
+                    }
+                }
+
                 item {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -1114,16 +1239,23 @@ fun CreateBillDialog(
                                         inputError = "Số lượng phải lớn hơn 0."
                                     itemPrice.toLongOrNull() == null || itemPrice.toLong() <= 0L ->
                                         inputError = "Đơn giá phải lớn hơn 0."
+                                    draftItem == null || !draftItem.hasValidSharesFor(project.memberIds) ->
+                                        inputError = "Kiểm tra tổng tiền chia của món."
                                     else -> {
-                                        savedItems = savedItems + draftItem!!
+                                        savedItems = savedItems + draftItem
                                         itemName = ""
                                         itemQty = ""
                                         itemPrice = ""
+                                        draftAllocation = BillItem(
+                                            name = "",
+                                            unitPrice = 0L,
+                                            payerUserIds = project.memberIds
+                                        )
                                         inputError = null
                                     }
                                 }
                             },
-                            enabled = draftItem != null
+                            enabled = draftItem?.hasValidSharesFor(project.memberIds) == true
                         ) {
                             Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(4.dp))
@@ -1143,42 +1275,32 @@ fun CreateBillDialog(
                         shape = RoundedCornerShape(10.dp)
                     ) {
                         Column(modifier = Modifier.padding(10.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text("Điều chỉnh số tiền từng người", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = PrimaryTealDark)
-                                Switch(checked = customSplitEnabled, onCheckedChange = { customSplitEnabled = it })
+                            Text(
+                                "Số tiền tổng phải trả của từng người",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp,
+                                color = PrimaryTealDark
+                            )
+                            val totalsByMember = project.memberIds.associateWith { memberId ->
+                                savedItems.sumOf { item ->
+                                    item.sharesFor(project.memberIds)[memberId] ?: 0L
+                                }
                             }
-
-                            if (customSplitEnabled) {
-                                Spacer(modifier = Modifier.height(8.dp))
-                                val selectedCount = selectedParticipantIds.size
-                                Text(
-                                    "Mặc định chia đều (${AppRepository.formatCurrency(if (selectedCount > 0) totalEstimated / selectedCount else 0L)}/người). Bạn có thể chỉnh sửa:",
-                                    fontSize = 11.sp,
-                                    color = TextDark
-                                )
-                                Spacer(modifier = Modifier.height(6.dp))
-
-                                project.memberIds.filter { it in selectedParticipantIds }.forEach { memberId ->
-                                    val user = AppRepository.getUserById(memberId)
-                                    val currentAmount = memberAmounts[memberId] ?: "0"
-
+                            project.memberIds.forEach { memberId ->
+                                val amount = totalsByMember[memberId] ?: 0L
+                                if (amount > 0L) {
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                        verticalAlignment = Alignment.CenterVertically
+                                        horizontalArrangement = Arrangement.SpaceBetween
                                     ) {
-                                        Text("${user?.name}:", fontSize = 12.sp, modifier = Modifier.weight(1f))
-                                        OutlinedTextField(
-                                            value = currentAmount,
-                                            onValueChange = { memberAmounts[memberId] = it.filter(Char::isDigit) },
-                                            modifier = Modifier.width(120.dp),
-                                            singleLine = true,
-                                            shape = RoundedCornerShape(8.dp),
-                                            colors = BillInputFieldColors()
+                                        Text(
+                                            AppRepository.getUserById(memberId)?.name ?: "Thành viên",
+                                            fontSize = 12.sp
+                                        )
+                                        Text(
+                                            AppRepository.formatCurrency(amount),
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.SemiBold
                                         )
                                     }
                                 }
@@ -1203,35 +1325,23 @@ fun CreateBillDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    val participatingMembers = project.memberIds.filter { it in selectedParticipantIds }
-                    val enteredAmounts = participatingMembers.associateWith { memberAmounts[it]?.toLongOrNull() }
                     val hasDraftInput = itemName.isNotBlank() || itemQty.isNotBlank() || itemPrice.isNotBlank()
                     when {
                         billTitle.isBlank() -> inputError = "Vui lòng nhập tên hóa đơn."
-                        participatingMembers.isEmpty() -> inputError = "Hãy chọn ít nhất một người tham gia bill."
                         savedItems.isEmpty() -> inputError = "Vui lòng thêm ít nhất một món vào bill."
                         hasDraftInput && draftItem == null -> inputError = "Vui lòng nhập đầy đủ tên món, số lượng và đơn giá."
                         hasDraftInput -> inputError = "Bấm “Thêm món” để đưa món đang nhập vào bill."
-                        customSplitEnabled && enteredAmounts.values.any { it == null } ->
-                            inputError = "Vui lòng nhập số tiền hợp lệ cho từng thành viên."
-                        customSplitEnabled && enteredAmounts.values.filterNotNull().sum() != totalEstimated ->
-                            inputError = "Tổng số tiền chia cho thành viên phải bằng tổng bill."
+                        savedItems.any { !it.hasValidSharesFor(project.memberIds) } ->
+                            inputError = "Kiểm tra lại phần tiền chia của từng món."
                         else -> {
-                            val total = totalEstimated
-                            val baseSplit = total / participatingMembers.size
-                            val remainder = total % participatingMembers.size
-                            val amountByMember = project.memberIds.associateWith { 0L }.toMutableMap().apply {
-                                participatingMembers.forEachIndexed { index, userId ->
-                                    put(
-                                        userId,
-                                        if (customSplitEnabled) {
-                                            enteredAmounts.getValue(userId)!!
-                                        } else {
-                                            baseSplit + if (index < remainder) 1L else 0L
-                                        }
-                                    )
+                            val amountByMember = project.memberIds.associateWith { 0L }.toMutableMap()
+                            val itemCountsByMember = project.memberIds.associateWith { 0 }.toMutableMap()
+                            savedItems.forEach { item ->
+                                item.sharesFor(project.memberIds).forEach { (userId, amount) ->
+                                    amountByMember[userId] = (amountByMember[userId] ?: 0L) + amount
+                                    itemCountsByMember[userId] = (itemCountsByMember[userId] ?: 0) + 1
                                 }
-                            }.toMap()
+                            }
                             val newBill = Bill(
                                 projectId = project.id,
                                 title = billTitle.trim(),
@@ -1246,13 +1356,14 @@ fun CreateBillDialog(
                                 mode = selectedMode,
                                 nb2Permission = Nb2Permission(),
                                 receiptImageUri = null,
-                                items = savedItems.map { it.copy(payerUserIds = participatingMembers) },
+                                items = savedItems,
                                 memberStatuses = project.memberIds.associateWith { uId ->
                                     MemberBillStatus(
                                         userId = uId,
-                                        itemCount = if (uId in selectedParticipantIds) savedItems.size else 0,
+                                        itemCount = itemCountsByMember[uId] ?: 0,
                                         amountOwed = amountByMember[uId] ?: 0L,
-                                        isApproved = (uId == advanceUserId || (amountByMember[uId] ?: 0L) == 0L),
+                                        isApproved = uId == currentUser.id ||
+                                            (amountByMember[uId] ?: 0L) == 0L,
                                         isPaid = (uId == advanceUserId || (amountByMember[uId] ?: 0L) == 0L),
                                         isCreatorConfirmed = (uId == advanceUserId || (amountByMember[uId] ?: 0L) == 0L)
                                     )
@@ -1289,6 +1400,33 @@ fun CreateBillDialog(
         ) {
             DatePicker(state = billDatePickerState, showModeToggle = true)
         }
+    }
+
+    if (showVoiceBillInput) {
+        VoiceBillDraftDialog(
+            onDismiss = { showVoiceBillInput = false },
+            onConfirm = { voiceItems ->
+                savedItems = savedItems + voiceItems.map { item ->
+                    item.copy(payerUserIds = project.memberIds)
+                }
+                showVoiceBillInput = false
+                inputError = null
+            }
+        )
+    }
+
+    if (showReceiptBillInput) {
+        ReceiptBillDraftDialog(
+            onDismiss = { showReceiptBillInput = false },
+            onConfirm = { scannedTitle, scannedItems ->
+                if (billTitle.isBlank()) billTitle = scannedTitle
+                savedItems = savedItems + scannedItems.map { item ->
+                    item.copy(payerUserIds = project.memberIds)
+                }
+                showReceiptBillInput = false
+                inputError = null
+            }
+        )
     }
 }
 

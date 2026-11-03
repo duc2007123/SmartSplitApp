@@ -53,6 +53,7 @@ import com.smartsplit.app.data.MemberBillStatus
 import com.smartsplit.app.data.Project
 import com.smartsplit.app.data.User
 import com.smartsplit.app.data.unpaidAmountFor
+import com.smartsplit.app.service.ReceiptAiHelper
 import com.smartsplit.app.service.ReceiptOcrAnalyzer
 import com.smartsplit.app.ui.theme.*
 import kotlinx.coroutines.Dispatchers
@@ -770,7 +771,8 @@ fun HomeScreen(
                     userId = uId,
                     itemCount = itemCountsByMember[uId] ?: 0,
                     amountOwed = (amountsByMember[uId] ?: 0L),
-                    isApproved = (uId == selectedAdvanceUserId || (amountsByMember[uId] ?: 0L) == 0L),
+                    isApproved = uId == currentUser.id ||
+                        (amountsByMember[uId] ?: 0L) == 0L,
                     isPaid = (uId == selectedAdvanceUserId || (amountsByMember[uId] ?: 0L) == 0L),
                     isCreatorConfirmed = (uId == selectedAdvanceUserId || (amountsByMember[uId] ?: 0L) == 0L)
                 )
@@ -2012,12 +2014,16 @@ fun OcrScanBillDialog(
             try {
                 val bitmap = withContext(Dispatchers.IO) { ReceiptOcrAnalyzer.loadBitmap(context, uri) }
                 previewBitmap = bitmap
-                val result = withContext(Dispatchers.IO) { ReceiptOcrAnalyzer.analyzeBitmap(bitmap) }
-                billTitle = result.title
-                parsedItems = result.items
-                if (result.items.isEmpty()) {
-                    errorMessage = "Không đọc được món/giá. Chụp rõ, đủ sáng, thẳng hóa đơn rồi thử lại."
+                val result = ReceiptAiHelper.scanReceiptToDraftItems(bitmap).getOrThrow()
+                billTitle = "Hóa đơn quét ảnh"
+                parsedItems = result.map { item ->
+                    BillItem(name = item.name, quantity = item.quantity, unitPrice = item.price)
                 }
+                if (result.isEmpty()) {
+                    errorMessage = "Gemini không tìm thấy món có giá đọc được trong ảnh."
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 errorMessage = e.message ?: "Không phân tích được ảnh này"
             } finally {
@@ -2407,6 +2413,8 @@ fun VoiceAiBillDialog(
     onDismiss: () -> Unit,
     onPushToProject: (String, String, List<BillItem>, String?) -> Unit
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var voiceQuery by remember { mutableStateOf("") }
     var billTitle by remember { mutableStateOf("") }
     var parsedItems by remember { mutableStateOf<List<BillItem>>(emptyList()) }
@@ -2415,6 +2423,8 @@ fun VoiceAiBillDialog(
     var peopleCount by remember { mutableStateOf("") }
     var splitForProject by remember { mutableStateOf(false) }
     var selectedPayers by remember { mutableStateOf<Map<String, List<String>>>(emptyMap()) }
+    var parseMessage by remember { mutableStateOf<String?>(null) }
+    var isParsingVoice by remember { mutableStateOf(false) }
     var advanceUserId by remember {
         mutableStateOf(
             projects.firstOrNull()?.memberIds?.firstOrNull { it == currentUser.id }
@@ -2422,7 +2432,39 @@ fun VoiceAiBillDialog(
         )
     }
 
-    // Launcher nhận diện giọng nói thực tế từ Microphone thiết bị
+    fun parseVoiceText(text: String) {
+        scope.launch {
+            isParsingVoice = true
+            parseMessage = null
+            parsedItems = emptyList()
+            try {
+                val result = ReceiptAiHelper.parseVoiceTextToDraftItems(text)
+                result.fold(
+                    onSuccess = { draftItems ->
+                        parsedItems = draftItems.map { item ->
+                            BillItem(name = item.name, quantity = item.quantity, unitPrice = item.price)
+                        }
+                        parseMessage = if (parsedItems.isEmpty()) {
+                            "Gemini chưa tìm thấy món và giá trong câu nói."
+                        } else {
+                            null
+                        }
+                        if (billTitle.isBlank() && parsedItems.isNotEmpty()) {
+                            billTitle = "Bill giọng nói"
+                        }
+                    },
+                    onFailure = { error ->
+                        parseMessage =
+                            "Không thể phân tích câu nói bằng Gemini: ${error.localizedMessage ?: "lỗi không xác định"}"
+                    }
+                )
+            } finally {
+                isParsingVoice = false
+            }
+        }
+    }
+
+    // Launcher nhận diện giọng nói trên thiết bị
     val speechLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -2430,32 +2472,16 @@ fun VoiceAiBillDialog(
             val spokenText = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull() ?: ""
             if (spokenText.isNotBlank()) {
                 voiceQuery = spokenText
-                // Parser NLP phân tích câu nói
-                if (spokenText.contains("lẩu", ignoreCase = true)) {
-                    billTitle = "Lẩu liên hoan nhóm"
-                    parsedItems = listOf(
-                        BillItem(name = "Set Lẩu nhóm 4 người", quantity = 1, unitPrice = 600000L),
-                        BillItem(name = "Nước ngọt lon", quantity = 4, unitPrice = 10000L)
-                    )
-                } else if (spokenText.contains("chợ", ignoreCase = true) || spokenText.contains("siêu thị", ignoreCase = true)) {
-                    billTitle = "Mua đồ siêu thị phòng trọ"
-                    parsedItems = listOf(
-                        BillItem(name = "Bột giặt OMO", quantity = 1, unitPrice = 120000L),
-                        BillItem(name = "Dầu ăn Simply", quantity = 1, unitPrice = 65000L),
-                        BillItem(name = "Trứng gà", quantity = 1, unitPrice = 35000L)
-                    )
-                } else {
-                    billTitle = "Bữa ăn trưa nhóm"
-                    parsedItems = listOf(
-                        BillItem(name = "Cơm sườn đặc biệt", quantity = 3, unitPrice = 45000L),
-                        BillItem(name = "Coca lon", quantity = 3, unitPrice = 10000L)
-                    )
-                }
+                parsedItems = emptyList()
+                parseMessage = null
             }
         }
     }
 
     val totalAmount = parsedItems.sumOf { it.totalPrice }
+    val parsedItemsValid = parsedItems.isNotEmpty() && parsedItems.all {
+        it.name.isNotBlank() && it.quantity in 1..99 && it.unitPrice > 0L
+    }
     val splitProject = projects.firstOrNull { it.id == selectedProjectId }
     val guestCount = peopleCount.toIntOrNull()?.coerceIn(1, 30) ?: 0
     val splitParticipants = if (splitForProject) {
@@ -2478,7 +2504,7 @@ fun VoiceAiBillDialog(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.Mic, contentDescription = null, tint = SecondaryIndigo)
                 Spacer(modifier = Modifier.width(8.dp))
-                Text(if (isQuickSplitMode) "Phân chia" else "Giọng nói AI & Bóc tách Bill", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                Text(if (isQuickSplitMode) "Phân chia" else "Nhập bill bằng giọng nói", fontWeight = FontWeight.Bold, fontSize = 16.sp)
             }
         },
         text = {
@@ -2496,14 +2522,19 @@ fun VoiceAiBillDialog(
                         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                             putExtra(RecognizerIntent.EXTRA_LANGUAGE, "vi-VN")
-                            putExtra(RecognizerIntent.EXTRA_PROMPT, "Đang nghe... Nói hóa đơn của bạn:")
+                            putExtra(RecognizerIntent.EXTRA_PROMPT, "Nói hóa đơn, sau đó kiểm tra câu trước khi gửi Gemini:")
                         }
                         try {
                             speechLauncher.launch(intent)
-                        } catch (e: Exception) {
-                            AppRepository.pushNotification("Mic", "Vui lòng cấp quyền Micro hoặc chọn câu nói mẫu để test")
+                        } catch (error: Exception) {
+                            Toast.makeText(
+                                context,
+                                "Không mở được dịch vụ nhận diện giọng nói: ${error.localizedMessage ?: "lỗi không xác định"}",
+                                Toast.LENGTH_LONG
+                            ).show()
                         }
                     },
+                    enabled = !isParsingVoice,
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.buttonColors(containerColor = SecondaryIndigo),
                     shape = RoundedCornerShape(12.dp),
@@ -2514,8 +2545,8 @@ fun VoiceAiBillDialog(
                     Text("🎙️ Nhấn để nói trực tiếp...", fontWeight = FontWeight.Bold)
                 }
 
-                // Dòng câu nói mẫu thử nghiệm nhanh
-                Text("Hoặc bấm câu nói mẫu dưới đây để test AI bóc tách:", fontSize = 11.sp, color = TextMedium)
+                // Câu mẫu đi qua cùng bộ phân tích như nội dung vừa nhận diện.
+                Text("Hoặc điền câu mẫu:", fontSize = 11.sp, color = TextMedium)
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Surface(
                         modifier = Modifier
@@ -2523,11 +2554,8 @@ fun VoiceAiBillDialog(
                             .clip(RoundedCornerShape(8.dp))
                             .clickable {
                                 voiceQuery = "Ăn trưa 3 suất cơm sườn 45 nghìn với 3 lon coca 10 nghìn"
-                                billTitle = "Cơm trưa văn phòng"
-                                parsedItems = listOf(
-                                    BillItem(name = "Cơm sườn đặc biệt", quantity = 3, unitPrice = 45000L),
-                                    BillItem(name = "Coca Cola lon", quantity = 3, unitPrice = 10000L)
-                                )
+                                parsedItems = emptyList()
+                                parseMessage = null
                             },
                         color = BackgroundSlate
                     ) {
@@ -2540,11 +2568,8 @@ fun VoiceAiBillDialog(
                             .clip(RoundedCornerShape(8.dp))
                             .clickable {
                                 voiceQuery = "Tối qua ăn lẩu nhóm 4 người 600 nghìn, 4 lon nước ngọt 40 nghìn"
-                                billTitle = "Lẩu liên hoan nhóm"
-                                parsedItems = listOf(
-                                    BillItem(name = "Set Lẩu Thái 4 người", quantity = 1, unitPrice = 600000L),
-                                    BillItem(name = "Nước ngọt lon", quantity = 4, unitPrice = 10000L)
-                                )
+                                parsedItems = emptyList()
+                                parseMessage = null
                             },
                         color = BackgroundSlate
                     ) {
@@ -2557,12 +2582,8 @@ fun VoiceAiBillDialog(
                             .clip(RoundedCornerShape(8.dp))
                             .clickable {
                                 voiceQuery = "Đi siêu thị: bột giặt 120k, dầu ăn 65k, trứng gà 35k"
-                                billTitle = "Mua đồ tạp hóa phòng trọ"
-                                parsedItems = listOf(
-                                    BillItem(name = "Bột giặt OMO", quantity = 1, unitPrice = 120000L),
-                                    BillItem(name = "Dầu ăn Simply 2L", quantity = 1, unitPrice = 65000L),
-                                    BillItem(name = "Trứng gà vỉ", quantity = 1, unitPrice = 35000L)
-                                )
+                                parsedItems = emptyList()
+                                parseMessage = null
                             },
                         color = BackgroundSlate
                     ) {
@@ -2573,12 +2594,26 @@ fun VoiceAiBillDialog(
                 // Khung câu nói đã nhận diện
                 OutlinedTextField(
                     value = voiceQuery,
-                    onValueChange = { voiceQuery = it },
+                    onValueChange = {
+                        voiceQuery = it
+                        parsedItems = emptyList()
+                        parseMessage = null
+                    },
                     label = { Text("Nội dung giọng nói đã ghi nhận") },
                     placeholder = { InputPlaceholder("Nói hoặc nhập nội dung hóa đơn") },
                     modifier = Modifier.fillMaxWidth(),
                     colors = BillInputFieldColors()
                 )
+                Button(
+                    onClick = { parseVoiceText(voiceQuery) },
+                    enabled = voiceQuery.isNotBlank() && !isParsingVoice,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = SecondaryIndigo)
+                ) {
+                    Text(if (isParsingVoice) "Gemini đang phân tích..." else "Gửi câu nói cho Gemini")
+                }
+                if (isParsingVoice) CircularProgressIndicator()
+                parseMessage?.let { Text(it, color = ErrorRed, fontSize = 12.sp) }
 
                 // Card hiển thị kết quả phân tích NLP bóc tách
                 Card(
@@ -2593,12 +2628,12 @@ fun VoiceAiBillDialog(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("⚡ AI bóc tách món ăn & đơn giá:", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = SecondaryIndigo)
+                            Text("Bản nháp món và đơn giá:", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = SecondaryIndigo)
                             Surface(
                                 shape = RoundedCornerShape(6.dp),
                                 color = SecondaryIndigo.copy(alpha = 0.15f)
                             ) {
-                                Text("NLP Ready", fontSize = 10.sp, color = SecondaryIndigo, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                                Text("Xử lý tại máy", fontSize = 10.sp, color = SecondaryIndigo, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
                             }
                         }
 
@@ -2621,9 +2656,48 @@ fun VoiceAiBillDialog(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(item.name, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
-                                    Text("${item.quantity} x ${AppRepository.formatCurrency(item.unitPrice)}", fontSize = 11.sp, color = TextMedium)
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    OutlinedTextField(
+                                        value = item.name,
+                                        onValueChange = { value ->
+                                            parsedItems = parsedItems.toMutableList().also {
+                                                it[index] = item.copy(name = value)
+                                            }
+                                        },
+                                        label = { Text("Tên món") },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        colors = BillInputFieldColors(),
+                                        singleLine = true
+                                    )
+                                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        OutlinedTextField(
+                                            value = item.quantity.toString(),
+                                            onValueChange = { value ->
+                                                parsedItems = parsedItems.toMutableList().also {
+                                                    it[index] = item.copy(quantity = value.filter(Char::isDigit).toIntOrNull() ?: 0)
+                                                }
+                                            },
+                                            label = { Text("SL") },
+                                            modifier = Modifier.weight(1f),
+                                            colors = BillInputFieldColors(),
+                                            singleLine = true
+                                        )
+                                        OutlinedTextField(
+                                            value = item.unitPrice.takeIf { it > 0L }?.toString().orEmpty(),
+                                            onValueChange = { value ->
+                                                parsedItems = parsedItems.toMutableList().also {
+                                                    it[index] = item.copy(unitPrice = value.filter(Char::isDigit).toLongOrNull() ?: 0L)
+                                                }
+                                            },
+                                            label = { Text("Đơn giá") },
+                                            modifier = Modifier.weight(2f),
+                                            colors = BillInputFieldColors(),
+                                            singleLine = true
+                                        )
+                                    }
                                 }
                                 Text(AppRepository.formatCurrency(item.totalPrice), fontWeight = FontWeight.Bold, fontSize = 12.sp, color = SecondaryIndigo)
                                 Spacer(modifier = Modifier.width(6.dp))
@@ -2730,7 +2804,7 @@ fun VoiceAiBillDialog(
                         }
                         onDismiss()
                     },
-                    enabled = parsedItems.isNotEmpty() && (splitForProject || guestCount > 0),
+                    enabled = parsedItemsValid && (splitForProject || guestCount > 0),
                     colors = ButtonDefaults.buttonColors(containerColor = if (splitForProject) PrimaryTeal else SecondaryIndigo)
                 ) {
                     Text(if (splitForProject) "Lưu vào dự án" else "Hoàn tất")
@@ -2742,7 +2816,7 @@ fun VoiceAiBillDialog(
                         splitForProject = true
                         selectedPayers = emptyMap()
                     },
-                    enabled = parsedItems.isNotEmpty() && selectedProjectId.isNotBlank(),
+                    enabled = parsedItemsValid && selectedProjectId.isNotBlank(),
                     colors = ButtonDefaults.buttonColors(containerColor = PrimaryTeal)
                 ) { Text("Phân chia") }
             }
