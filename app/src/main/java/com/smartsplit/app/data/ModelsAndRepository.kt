@@ -209,6 +209,16 @@ data class Bill(
         return status.isApproved && (!isCreditor || status.hasExplicitApproval)
     }
 
+    fun isMemberPaymentComplete(userId: String): Boolean {
+        if (isMergedParent) {
+            val memberTransfers = optimizedTransfers.filter { it.fromUserId == userId }
+            return memberTransfers.isEmpty() ||
+                memberTransfers.all { it.isPaid && it.isConfirmed }
+        }
+        val status = memberStatuses[userId] ?: return false
+        return status.amountOwed <= 0L || status.isCreatorConfirmed
+    }
+
     // Kiểm tra xem bill này đã được duyệt hết chưa (Mặt ngoài 1.9.4)
     val isAllApproved: Boolean
         get() = memberStatuses.isNotEmpty() && memberStatuses.keys.all(::isMemberApproved)
@@ -231,7 +241,7 @@ fun Bill.unpaidAmountFor(userId: String): Long {
         }
         val status = memberStatuses[userId] ?: return 0L
         return if (
-            (debtObject != null || isMemberApproved(userId)) &&
+            isMemberApproved(userId) &&
             !status.isCreatorConfirmed
         ) {
             status.amountOwed

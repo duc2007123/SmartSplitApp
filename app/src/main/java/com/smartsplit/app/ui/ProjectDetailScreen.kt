@@ -455,8 +455,8 @@ fun ProjectDetailScreen(
                     else -> true
                 }
                 val matchPayment = when (paymentFilter) {
-                    "Đã thanh toán" -> bill.isAllPaid
-                    "Chưa thanh toán" -> !bill.isAllPaid
+                    "Đã thanh toán" -> bill.isMemberPaymentComplete(currentUser.id)
+                    "Chưa thanh toán" -> !bill.isMemberPaymentComplete(currentUser.id)
                     else -> true
                 }
                 val matchDate = if (dateFilter != null) {
@@ -780,9 +780,17 @@ fun BillCardItem(
 
                     // Ô 2: Trạng thái Đã trả
                     StatusBadgeBox(
-                        isCompleted = bill.isAllPaid,
+                        isCompleted = bill.isMemberPaymentComplete(currentUserId),
                         completedText = "☑️ Đã trả",
-                        uncompletedText = "⏳ Chưa trả",
+                        uncompletedText = if (
+                            bill.memberStatuses[currentUserId]?.let {
+                                it.isPaid && !it.isCreatorConfirmed
+                            } == true
+                        ) {
+                            "⌛ Chờ XN"
+                        } else {
+                            "⏳ Chưa trả"
+                        },
                         activeColor = PrimaryTeal,
                         modifier = Modifier.width(92.dp)
                     )
