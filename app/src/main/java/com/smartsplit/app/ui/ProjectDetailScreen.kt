@@ -96,8 +96,7 @@ fun ProjectDetailScreen(
         !bill.isMergedParent &&
             bill.mergedIntoBillId == null &&
             bill.isAllApproved &&
-            !bill.isAllPaid &&
-            bill.memberStatuses.values.any { it.amountOwed > 0L && !it.isCreatorConfirmed }
+            !bill.isAllPaid
     }
     val externalRepresentativeOptions = eligibleMergeBills
         .filter { it.debtObject != null }

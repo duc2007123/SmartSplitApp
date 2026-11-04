@@ -1122,7 +1122,6 @@ object AppRepository {
             bill.mergedIntoBillId == null &&
             bill.isAllApproved &&
             !bill.isAllPaid &&
-            bill.memberStatuses.values.any { it.amountOwed > 0L && !it.isCreatorConfirmed } &&
             (selectedBillIds == null || bill.id in selectedBillIds)
         }
 
