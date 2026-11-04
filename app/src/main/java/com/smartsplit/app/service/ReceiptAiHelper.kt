@@ -17,7 +17,7 @@ data class DraftScannedItem(
 )
 
 object ReceiptAiHelper {
-    private const val MODEL_NAME = "gemini-2.5-flash"
+    private const val MODEL_NAME = "gemini-3.8-flash"
 
     private val visionModel: GenerativeModel by lazy {
         val apiKey = BuildConfig.GEMINI_API_KEY
@@ -42,19 +42,23 @@ object ReceiptAiHelper {
         try {
             val prompt = """
                 Bạn là trợ lý bóc tách thông tin hóa đơn từ câu nói tiếng Việt.
-                Tách câu sau thành từng món hàng, đồ ăn hoặc dịch vụ:
+                Người dùng vừa đọc một đoạn văn bản mô tả các món đã mua:
                 "$spokenText"
 
-                Quy tắc:
-                1. Quy đổi k, nghìn, ngàn, cành thành 1.000 VNĐ; lít thành 100.000 VNĐ;
-                   củ/triệu thành 1.000.000 VNĐ. "Củ rưỡi" là 1.500.000 VNĐ.
-                2. Trả về đơn giá một đơn vị. Nếu câu nói là tổng tiền cho số lượng,
-                   chia tổng tiền cho số lượng để ra đơn giá.
-                3. Nếu không nói số lượng, đặt quantity = 1.
-                4. Bỏ qua lời chào, người ứng tiền, thời gian và thông tin không phải món.
-                5. Chỉ trả về mảng JSON, mỗi phần tử có đúng các trường:
+                QUY TẮC BẮT BUỘC:
+                1. Tách thành từng món hàng, đồ ăn hoặc dịch vụ; bỏ qua lời chào,
+                   người ứng tiền, thời gian và thông tin không phải món.
+                2. Quy đổi tiền Việt: "k", "nghìn", "ngàn", "cành" nhân 1.000;
+                   "lít" nhân 100.000; "củ", "triệu" nhân 1.000.000.
+                   Ví dụ "củ rưỡi" là 1.500.000 VNĐ.
+                3. Trả về đơn giá của một đơn vị. Nếu giá nói là tổng tiền cho số lượng,
+                   chia tổng tiền cho số lượng. Ví dụ 3 lon tổng 30 nghìn thì quantity = 3,
+                   price = 10000; 2 cân cam 50k thì quantity = 2, price = 25000.
+                   Nếu không nói số lượng thì quantity = 1.
+                4. Viết tên món gọn gàng, viết hoa chữ cái đầu.
+                5. Trả về duy nhất một mảng JSON; mỗi đối tượng chỉ có đúng ba trường:
                    {"name":"Tên món","quantity":1,"price":10000}
-                Giá price là số nguyên VNĐ.
+                   quantity là số nguyên từ 1 đến 99; price là đơn giá VNĐ dạng số nguyên.
             """.trimIndent()
             val response = visionModel.generateContent(prompt)
             Result.success(parseJsonToDraftItems(requireNotNull(response.text) {

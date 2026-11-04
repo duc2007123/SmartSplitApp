@@ -254,11 +254,14 @@ class AppDataDatabaseHelper(context: Context) :
                 put(JSONObject().apply {
                     put("id", transfer.id)
                     put("fromUserId", transfer.fromUserId)
-                    put("toUserId", transfer.toUserId)
+                    putNullable("toUserId", transfer.toUserId)
                     put("amount", transfer.amount)
                     put("transferCode", transfer.transferCode)
                     put("isPaid", transfer.isPaid)
                     put("isConfirmed", transfer.isConfirmed)
+                    putNullable("recipientName", transfer.recipientName)
+                    put("isExternalPayment", transfer.isExternalPayment)
+                    putNullable("sourceBillId", transfer.sourceBillId)
                 })
             }
         })
@@ -380,11 +383,14 @@ class AppDataDatabaseHelper(context: Context) :
                     add(OptimizedTransfer(
                         id = transfer.getString("id"),
                         fromUserId = transfer.getString("fromUserId"),
-                        toUserId = transfer.getString("toUserId"),
+                        toUserId = transfer.optNullableString("toUserId"),
                         amount = transfer.optLong("amount", 0L),
                         transferCode = transfer.optString("transferCode", ""),
                         isPaid = transfer.optBoolean("isPaid", false),
-                        isConfirmed = transfer.optBoolean("isConfirmed", false)
+                        isConfirmed = transfer.optBoolean("isConfirmed", false),
+                        recipientName = transfer.optNullableString("recipientName"),
+                        isExternalPayment = transfer.optBoolean("isExternalPayment", false),
+                        sourceBillId = transfer.optNullableString("sourceBillId")
                     ))
                 }
             },

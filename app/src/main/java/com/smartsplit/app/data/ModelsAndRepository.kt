@@ -158,11 +158,14 @@ data class BillDebtObject(
 data class OptimizedTransfer(
     val id: String = UUID.randomUUID().toString(),
     val fromUserId: String,                 // Người cần chuyển tiền
-    val toUserId: String,                   // Người nhận tiền
+    val toUserId: String?,                  // Thành viên nhận tiền; null khi trả chủ bill bên ngoài
     val amount: Long,                       // Số tiền đã tối ưu
     val transferCode: String,               // Mã chuyển khoản quy ước (SM_P302_B01_TUAN)
     val isPaid: Boolean = false,            // Đã trả tiền chưa
-    val isConfirmed: Boolean = false        // Người nhận đã xác nhận chưa
+    val isConfirmed: Boolean = false,       // Người nhận đã xác nhận chưa
+    val recipientName: String? = null,
+    val isExternalPayment: Boolean = false,
+    val sourceBillId: String? = null
 )
 
 data class BillEditHistory(
@@ -230,6 +233,97 @@ data class Bill(
         } else {
             memberStatuses.isNotEmpty() && memberStatuses.values.all { it.isPaid && it.isCreatorConfirmed }
         }
+}
+
+internal data class MergedBillSettlement(
+        val memberNetBalances: Map<String, Long>,
+        val transfers: List<OptimizedTransfer>
+)
+
+internal fun calculateMergedBillSettlement(
+        project: Project,
+        bills: List<Bill>,
+        representativeByBillId: Map<String, String>,
+        mergedBillId: String,
+        memberNames: Map<String, String>
+): MergedBillSettlement {
+        val balances = project.memberIds.associateWith { 0L }.toMutableMap()
+        val externalPayments = mutableListOf<OptimizedTransfer>()
+
+        bills.forEach { bill ->
+            val unpaidAmounts = bill.memberStatuses.mapValues { (userId, status) ->
+                if (bill.isMemberApproved(userId) && !status.isCreatorConfirmed) {
+                    status.amountOwed.coerceAtLeast(0L)
+                } else {
+                    0L
+                }
+            }
+            val outstandingTotal = unpaidAmounts.values.sum()
+            if (outstandingTotal <= 0L) return@forEach
+
+            if (bill.debtObject == null) {
+                val creditorId = bill.advanceUserId ?: bill.creatorId
+                balances[creditorId] = (balances[creditorId] ?: 0L) + outstandingTotal
+            } else {
+                val eligibleRepresentatives = project.memberIds.filter { userId ->
+                    (unpaidAmounts[userId] ?: 0L) > 0L
+                }
+                val representativeId = representativeByBillId[bill.id]
+                    ?.takeIf { it in eligibleRepresentatives }
+                    ?: eligibleRepresentatives.firstOrNull()
+                    ?: return@forEach
+                balances[representativeId] = (balances[representativeId] ?: 0L) + outstandingTotal
+                externalPayments += OptimizedTransfer(
+                    fromUserId = representativeId,
+                    toUserId = null,
+                    amount = outstandingTotal,
+                    transferCode = "SM_${project.inviteCode}_${mergedBillId}_${bill.id}",
+                    recipientName = "Chủ bill: ${bill.title}",
+                    isExternalPayment = true,
+                    sourceBillId = bill.id
+                )
+            }
+
+            unpaidAmounts.forEach { (userId, amount) ->
+                balances[userId] = (balances[userId] ?: 0L) - amount
+            }
+        }
+
+        class BalanceNode(val userId: String, var amount: Long)
+
+        val creditors = balances
+            .filterValues { it > 0L }
+            .map { (userId, amount) -> BalanceNode(userId, amount) }
+            .toMutableList()
+        val debtors = balances
+            .filterValues { it < 0L }
+            .map { (userId, amount) -> BalanceNode(userId, -amount) }
+            .toMutableList()
+        val internalTransfers = mutableListOf<OptimizedTransfer>()
+        var creditorIndex = 0
+        var debtorIndex = 0
+
+        while (creditorIndex < creditors.size && debtorIndex < debtors.size) {
+            val creditor = creditors[creditorIndex]
+            val debtor = debtors[debtorIndex]
+            val amount = min(creditor.amount, debtor.amount)
+            val debtorName = memberNames[debtor.userId]?.uppercase(Locale.getDefault()) ?: "USER"
+            internalTransfers += OptimizedTransfer(
+                fromUserId = debtor.userId,
+                toUserId = creditor.userId,
+                amount = amount,
+                transferCode = "SM_${project.inviteCode}_${mergedBillId}_$debtorName"
+            )
+            creditor.amount -= amount
+            debtor.amount -= amount
+            if (creditor.amount == 0L) creditorIndex++
+            if (debtor.amount == 0L) debtorIndex++
+        }
+
+        return MergedBillSettlement(
+            memberNetBalances = balances,
+            transfers = internalTransfers + externalPayments
+        )
 }
 
 fun Bill.unpaidAmountFor(userId: String): Long {
@@ -1010,7 +1104,11 @@ object AppRepository {
     // ==========================================
     // [MỤC 1.9.5] THUẬT TOÁN GỘP CÁC BILL ĐÃ DUYỆT & XOAY VÒNG TIỀN (MINIMUM CASH FLOW)
     // ==========================================
-    fun mergeApprovedBills(projectId: String, selectedBillIds: Set<String>? = null): Bill? {
+    fun mergeApprovedBills(
+        projectId: String,
+        selectedBillIds: Set<String>? = null,
+        representativeByBillId: Map<String, String> = emptyMap()
+    ): Bill? {
         val project = _projects.value.firstOrNull { it.id == projectId } ?: return null
 
         // ----------------------------------------------------
@@ -1022,7 +1120,6 @@ object AppRepository {
             bill.projectId == projectId &&
             !bill.isMergedParent &&
             bill.mergedIntoBillId == null &&
-            bill.debtObject == null &&
             bill.isAllApproved &&
             !bill.isAllPaid &&
             bill.memberStatuses.values.any { it.amountOwed > 0L && !it.isCreatorConfirmed } &&
@@ -1034,79 +1131,18 @@ object AppRepository {
             return null
         }
 
-        // ----------------------------------------------------
-        // BƯỚC 2: TÍNH TOÁN NET BALANCE (SỐ DƯ RÒNG) CỦA TỪNG NGƯỜI
-        // Net Balance = (Tổng số tiền người này đã ứng chi) - (Tổng số tiền người này đã tiêu dùng)
-        // Nếu Net > 0: Người này là CHỦ NỢ (ngồi nhận lại tiền)
-        // Nếu Net < 0: Người này là CON NỢ (cần chuyển tiền đi)
-        // ----------------------------------------------------
-        val netBalanceMap = mutableMapOf<String, Long>()
-        for (memberId in project.memberIds) {
-            netBalanceMap[memberId] = 0L
-        }
-
-        for (bill in eligibleBills) {
-            // Cộng tiền người ứng (Creator) đã bỏ ra
-            val creditorId = bill.advanceUserId ?: bill.debtObject?.ownerUserId ?: bill.creatorId
-            netBalanceMap[creditorId] = (netBalanceMap[creditorId] ?: 0L) + bill.totalAmount
-
-            // Trừ tiền từng thành viên đã tiêu trong bill này
-            for ((userId, status) in bill.memberStatuses) {
-                netBalanceMap[userId] = (netBalanceMap[userId] ?: 0L) - status.amountOwed
-            }
-        }
-
-        // ----------------------------------------------------
-        // BƯỚC 3: ÁP DỤNG THUẬT TOÁN MINIMUM CASH FLOW (RÚT GỌN GIAO DỊCH TỐI ĐA)
-        // Phân loại thành 2 nhóm: Người cần nhận tiền (Creditors) và Người cần trả tiền (Debtors)
-        // Ghép cặp Greedy để triệt tiêu số tiền nợ nhanh nhất với số lần chuyển tiền ít nhất
-        // ----------------------------------------------------
-        class BalanceNode(val userId: String, var amount: Long)
-
-        val creditors = mutableListOf<BalanceNode>() // Net > 0
-        val debtors = mutableListOf<BalanceNode>()   // Net < 0
-
-        for ((uId, net) in netBalanceMap) {
-            if (net > 0) creditors.add(BalanceNode(uId, net))
-            else if (net < 0) debtors.add(BalanceNode(uId, abs(net)))
-        }
-
-        val optimizedList = mutableListOf<OptimizedTransfer>()
         val mergedBillId = "MERGED_" + (100..999).random().toString()
-
-        var cIdx = 0
-        var dIdx = 0
-
-        while (cIdx < creditors.size && dIdx < debtors.size) {
-            val creditor = creditors[cIdx]
-            val debtor = debtors[dIdx]
-
-            // Số tiền chuyển giữa 2 người là giá trị nhỏ hơn giữa khoản nợ và khoản được nhận
-            val settleAmount = min(creditor.amount, debtor.amount)
-
-            val debtorUser = getUserById(debtor.userId)
-            val debtorName = debtorUser?.name?.uppercase(Locale.getDefault()) ?: "USER"
-
-            // [SỬA NHANH KHI VẤN ĐÁP] Tiền tố mã chuyển khoản xoay vòng
-            val code = "SM_${project.inviteCode}_${mergedBillId}_$debtorName"
-
-            optimizedList.add(
-                OptimizedTransfer(
-                    fromUserId = debtor.userId,
-                    toUserId = creditor.userId,
-                    amount = settleAmount,
-                    transferCode = code,
-                    isPaid = false,
-                    isConfirmed = false
-                )
-            )
-
-            creditor.amount -= settleAmount
-            debtor.amount -= settleAmount
-
-            if (creditor.amount == 0L) cIdx++
-            if (debtor.amount == 0L) dIdx++
-        }
+        val settlement = calculateMergedBillSettlement(
+            project = project,
+            bills = eligibleBills,
+            representativeByBillId = representativeByBillId,
+            mergedBillId = mergedBillId,
+            memberNames = project.memberIds.associateWith { memberId ->
+                getUserById(memberId)?.name ?: "USER"
+            }
+        )
+        val optimizedList = settlement.transfers
+        val netBalanceMap = settlement.memberNetBalances
 
         // ----------------------------------------------------
         // BƯỚC 4: TẠO BILL GỘP MỚI & GẮN ID ĐỂ LÀM TỐI MÀU CÁC BILL CŨ
@@ -1155,6 +1191,7 @@ object AppRepository {
         val mergedBillsToSave = updatedBills.filter { it.id == mergedBillId || it.id in childIds }
         database.saveBills(mergedBillsToSave)
         _bills.value = updatedBills
+        persistCurrentData()
         pushNotification(
             "Gộp bill thành công",
             "Đã gộp ${eligibleBills.size} bill thành 1 bill mới! Thuật toán tối ưu chỉ còn ${optimizedList.size} lần chuyển tiền!"
@@ -1165,16 +1202,37 @@ object AppRepository {
 
     // Xác nhận đã chuyển tiền trong Bill Gộp
     fun markOptimizedTransferPaid(transferId: String) {
+        var updatedTransfer = false
+        var markedExternalPayment = false
         _bills.value = _bills.value.map { bill ->
             if (bill.isMergedParent) {
                 val updatedList = bill.optimizedTransfers.map { tr ->
-                    if (tr.id == transferId) tr.copy(isPaid = true) else tr
+                    if (tr.id == transferId &&
+                        (!tr.isExternalPayment || tr.fromUserId == _currentUserId.value)
+                    ) {
+                        updatedTransfer = true
+                        markedExternalPayment = tr.isExternalPayment
+                        tr.copy(
+                            isPaid = true,
+                            isConfirmed = tr.isExternalPayment || tr.isConfirmed
+                        )
+                    } else {
+                        tr
+                    }
                 }
                 bill.copy(optimizedTransfers = updatedList)
             } else bill
         }
+        if (!updatedTransfer) return
         persistCurrentData()
-        pushNotification("Chuyển tiền xoay vòng", "Đã đánh dấu đã trả tiền cho giao dịch xoay vòng!")
+        pushNotification(
+            "Thanh toán bill gộp",
+            if (markedExternalPayment) {
+                "Đã xác nhận thanh toán cho chủ bill bên ngoài ứng dụng."
+            } else {
+                "Đã đánh dấu đã trả tiền cho giao dịch xoay vòng!"
+            }
+        )
     }
 
     // Chủ nợ xác nhận đã nhận được tiền trong Bill Gộp
@@ -1182,7 +1240,11 @@ object AppRepository {
         _bills.value = _bills.value.map { bill ->
             if (bill.isMergedParent) {
                 val updatedList = bill.optimizedTransfers.map { tr ->
-                    if (tr.id == transferId) tr.copy(isPaid = true, isConfirmed = true) else tr
+                    if (tr.id == transferId && !tr.isExternalPayment && tr.isPaid) {
+                        tr.copy(isConfirmed = true)
+                    } else {
+                        tr
+                    }
                 }
                 bill.copy(optimizedTransfers = updatedList)
             } else bill

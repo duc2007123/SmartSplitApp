@@ -694,6 +694,8 @@ fun MergedBillOverviewSection(
     bill: Bill,
     allBills: List<Bill>
 ) {
+    val currentUserId by AppRepository.currentUserId.collectAsState()
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
@@ -724,7 +726,7 @@ fun MergedBillOverviewSection(
             // Hiển thị từng lệnh chuyển tiền đã tối ưu
             bill.optimizedTransfers.forEach { transfer ->
                 val fromUser = AppRepository.getUserById(transfer.fromUserId)
-                val toUser = AppRepository.getUserById(transfer.toUserId)
+                val toUser = transfer.toUserId?.let(AppRepository::getUserById)
 
                 Surface(
                     modifier = Modifier
@@ -740,7 +742,11 @@ fun MergedBillOverviewSection(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "${fromUser?.name} ➔ ${toUser?.name}",
+                                text = "${fromUser?.name ?: "Thành viên"} ➔ ${
+                                    transfer.recipientName
+                                        ?: toUser?.name
+                                        ?: "Thành viên"
+                                }",
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 14.sp,
                                 color = TextDark
@@ -755,7 +761,11 @@ fun MergedBillOverviewSection(
 
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "Mã CK: ${transfer.transferCode}",
+                            text = if (transfer.isExternalPayment) {
+                                "Khoản ngoài ứng dụng • Bill: ${transfer.recipientName?.removePrefix("Chủ bill: ")}"
+                            } else {
+                                "Mã CK: ${transfer.transferCode}"
+                            },
                             fontSize = 11.sp,
                             color = TextMedium,
                             fontWeight = FontWeight.SemiBold
@@ -770,19 +780,24 @@ fun MergedBillOverviewSection(
                         ) {
                             StatusBadgeBox(
                                 isCompleted = transfer.isPaid,
-                                completedText = "☑️ Đã chuyển",
-                                uncompletedText = "⏳ Chưa chuyển",
+                                completedText = if (transfer.isExternalPayment) "☑️ Đã trả" else "☑️ Đã chuyển",
+                                uncompletedText = if (transfer.isExternalPayment) "⏳ Cần tự thanh toán" else "⏳ Chưa chuyển",
                                 activeColor = SuccessGreen
                             )
 
-                            if (!transfer.isPaid) {
+                            if (!transfer.isPaid &&
+                                (!transfer.isExternalPayment || transfer.fromUserId == currentUserId)
+                            ) {
                                 Button(
                                     onClick = { AppRepository.markOptimizedTransferPaid(transfer.id) },
                                     colors = ButtonDefaults.buttonColors(containerColor = SecondaryIndigo),
                                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                                     shape = RoundedCornerShape(6.dp)
                                 ) {
-                                    Text("Bấm Đã Trả", fontSize = 10.sp)
+                                    Text(
+                                        if (transfer.isExternalPayment) "Xác nhận đã trả ngoài app" else "Bấm Đã Trả",
+                                        fontSize = 10.sp
+                                    )
                                 }
                             } else if (!transfer.isConfirmed) {
                                 Button(

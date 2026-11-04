@@ -3,7 +3,6 @@ package com.smartsplit.app.ui
 import android.app.Activity
 import android.content.Intent
 import android.speech.RecognizerIntent
-import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -34,7 +33,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -49,28 +47,29 @@ fun VoiceBillDraftDialog(
     onDismiss: () -> Unit,
     onConfirm: (List<BillItem>) -> Unit
 ) {
-    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val transcript = remember { mutableStateOf("") }
     val items = remember { mutableStateListOf<BillItem>() }
     val errorMessage = remember { mutableStateOf<String?>(null) }
     val isAnalyzing = remember { mutableStateOf(false) }
+    val showTranscriptConfirmation = remember { mutableStateOf(false) }
     val speechLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            val recognizedText = result.data
+        val recognizedText = if (result.resultCode == Activity.RESULT_OK) {
+            result.data
                 ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
                 ?.firstOrNull()
                 .orEmpty()
-            if (recognizedText.isNotBlank()) {
-                transcript.value = recognizedText
-                items.clear()
-                errorMessage.value = null
-            } else {
-                errorMessage.value = "Không nhận diện được nội dung giọng nói."
-            }
+        } else {
+            ""
         }
+        if (recognizedText.isNotBlank()) {
+            transcript.value = recognizedText
+            items.clear()
+            errorMessage.value = null
+        }
+        showTranscriptConfirmation.value = true
     }
 
     fun analyzeTranscript() {
@@ -121,16 +120,14 @@ fun VoiceBillDraftDialog(
                         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                             putExtra(RecognizerIntent.EXTRA_LANGUAGE, "vi-VN")
-                            putExtra(RecognizerIntent.EXTRA_PROMPT, "Nói tên món và giá tiền")
+                            putExtra(RecognizerIntent.EXTRA_PROMPT, "Hãy đọc tên các món, số lượng và giá tiền...")
                         }
                         try {
                             speechLauncher.launch(intent)
                         } catch (error: Exception) {
-                            Toast.makeText(
-                                context,
-                                "Không mở được dịch vụ nhận diện giọng nói: ${error.localizedMessage ?: "lỗi không xác định"}",
-                                Toast.LENGTH_LONG
-                            ).show()
+                            errorMessage.value =
+                                "Không mở được dịch vụ nhận diện giọng nói. Hãy nhập câu hoặc dùng câu mẫu."
+                            showTranscriptConfirmation.value = true
                         }
                     },
                     enabled = !isAnalyzing.value,
@@ -227,6 +224,68 @@ fun VoiceBillDraftDialog(
                 }
             ) {
                 Text("Đưa vào bản nháp")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Hủy") }
+        }
+    )
+
+    if (showTranscriptConfirmation.value) {
+        VoiceConfirmOrFallbackDialog(
+            initialSpokenText = transcript.value,
+            onDismiss = { showTranscriptConfirmation.value = false },
+            onConfirmSendToAi = { text ->
+                transcript.value = text
+                showTranscriptConfirmation.value = false
+                analyzeTranscript()
+            }
+        )
+    }
+}
+
+@Composable
+fun VoiceConfirmOrFallbackDialog(
+    initialSpokenText: String,
+    onDismiss: () -> Unit,
+    onConfirmSendToAi: (String) -> Unit
+) {
+    val textState = remember(initialSpokenText) { mutableStateOf(initialSpokenText) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("🎤 Nội dung giọng nói thu được", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "Kiểm tra hoặc chỉnh câu trước khi AI tách thành tên món, số lượng và đơn giá.",
+                    fontSize = 12.sp
+                )
+                OutlinedTextField(
+                    value = textState.value,
+                    onValueChange = { textState.value = it },
+                    placeholder = {
+                        Text("Ví dụ: Mua 2 gà rán mỗi cái 35k, 3 lon coca tổng 30 nghìn...")
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 3
+                )
+                TextButton(
+                    onClick = {
+                        textState.value =
+                            "Mua 2 suất bún đậu mỗi suất 45 nghìn, 3 ly trà tắc tổng 30k và 1 đĩa dồi sụn 35 cành"
+                    }
+                ) {
+                    Text("⚡ Điền câu nói mẫu")
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onConfirmSendToAi(textState.value) },
+                enabled = textState.value.isNotBlank()
+            ) {
+                Text("🤖 Dùng AI tách món")
             }
         },
         dismissButton = {

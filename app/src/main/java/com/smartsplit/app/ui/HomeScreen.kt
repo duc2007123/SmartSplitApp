@@ -1389,16 +1389,19 @@ fun UnpaidBillsDialog(
                                         Button(
                                             onClick = {
                                                 if (bill.isMergedParent) {
-                                                    bill.optimizedTransfers
-                                                        .filter { it.fromUserId == userId && !it.isPaid }
-                                                        .forEach { AppRepository.markOptimizedTransferPaid(it.id) }
+                                                    onOpenBill(bill.id)
                                                 } else {
                                                     AppRepository.markMemberAsPaid(bill.id, userId)
                                                 }
                                             },
                                             modifier = Modifier.weight(1f),
                                             colors = ButtonDefaults.buttonColors(containerColor = PrimaryTeal)
-                                        ) { Text("Báo đã trả", fontSize = 11.sp) }
+                                        ) {
+                                            Text(
+                                                if (bill.isMergedParent) "Chi tiết / thanh toán" else "Báo đã trả",
+                                                fontSize = 11.sp
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -2425,6 +2428,7 @@ fun VoiceAiBillDialog(
     var selectedPayers by remember { mutableStateOf<Map<String, List<String>>>(emptyMap()) }
     var parseMessage by remember { mutableStateOf<String?>(null) }
     var isParsingVoice by remember { mutableStateOf(false) }
+    var showTranscriptConfirmation by remember { mutableStateOf(false) }
     var advanceUserId by remember {
         mutableStateOf(
             projects.firstOrNull()?.memberIds?.firstOrNull { it == currentUser.id }
@@ -2468,14 +2472,17 @@ fun VoiceAiBillDialog(
     val speechLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            val spokenText = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull() ?: ""
-            if (spokenText.isNotBlank()) {
-                voiceQuery = spokenText
-                parsedItems = emptyList()
-                parseMessage = null
-            }
+        val spokenText = if (result.resultCode == Activity.RESULT_OK) {
+            result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull().orEmpty()
+        } else {
+            ""
         }
+        if (spokenText.isNotBlank()) {
+            voiceQuery = spokenText
+            parsedItems = emptyList()
+            parseMessage = null
+        }
+        showTranscriptConfirmation = true
     }
 
     val totalAmount = parsedItems.sumOf { it.totalPrice }
@@ -2522,16 +2529,14 @@ fun VoiceAiBillDialog(
                         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                             putExtra(RecognizerIntent.EXTRA_LANGUAGE, "vi-VN")
-                            putExtra(RecognizerIntent.EXTRA_PROMPT, "Nói hóa đơn, sau đó kiểm tra câu trước khi gửi Gemini:")
+                            putExtra(RecognizerIntent.EXTRA_PROMPT, "Hãy đọc tên các món, số lượng và giá tiền...")
                         }
                         try {
                             speechLauncher.launch(intent)
                         } catch (error: Exception) {
-                            Toast.makeText(
-                                context,
-                                "Không mở được dịch vụ nhận diện giọng nói: ${error.localizedMessage ?: "lỗi không xác định"}",
-                                Toast.LENGTH_LONG
-                            ).show()
+                            parseMessage =
+                                "Không mở được dịch vụ nhận diện giọng nói. Hãy nhập câu hoặc dùng câu mẫu."
+                            showTranscriptConfirmation = true
                         }
                     },
                     enabled = !isParsingVoice,
@@ -2633,7 +2638,7 @@ fun VoiceAiBillDialog(
                                 shape = RoundedCornerShape(6.dp),
                                 color = SecondaryIndigo.copy(alpha = 0.15f)
                             ) {
-                                Text("Xử lý tại máy", fontSize = 10.sp, color = SecondaryIndigo, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                                Text("Gemini AI", fontSize = 10.sp, color = SecondaryIndigo, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
                             }
                         }
 
@@ -2837,6 +2842,18 @@ fun VoiceAiBillDialog(
             }
         }
     )
+
+    if (showTranscriptConfirmation) {
+        VoiceConfirmOrFallbackDialog(
+            initialSpokenText = voiceQuery,
+            onDismiss = { showTranscriptConfirmation = false },
+            onConfirmSendToAi = { text ->
+                voiceQuery = text
+                showTranscriptConfirmation = false
+                parseVoiceText(text)
+            }
+        )
+    }
 }
 
 // ==========================================

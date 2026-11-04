@@ -82,6 +82,10 @@ fun ProjectDetailScreen(
     var showUnpaidBillsDialog by remember { mutableStateOf(false) }
     var selectedMergeBillIds by remember(projectId) { mutableStateOf<Set<String>?>(null) }
     var previousEligibleMergeBillIds by remember(projectId) { mutableStateOf<Set<String>>(emptySet()) }
+    var selectedExternalRepresentatives by remember(projectId) {
+        mutableStateOf<Map<String, String>>(emptyMap())
+    }
+    var representativeMenuBillId by remember(projectId) { mutableStateOf<String?>(null) }
 
     // State hiển thị Dialog
     var showCreateBillDialog by remember { mutableStateOf(false) }
@@ -91,10 +95,25 @@ fun ProjectDetailScreen(
     val eligibleMergeBills = projectBills.filter { bill ->
         !bill.isMergedParent &&
             bill.mergedIntoBillId == null &&
-            bill.debtObject == null &&
             bill.isAllApproved &&
             !bill.isAllPaid &&
             bill.memberStatuses.values.any { it.amountOwed > 0L && !it.isCreatorConfirmed }
+    }
+    val externalRepresentativeOptions = eligibleMergeBills
+        .filter { it.debtObject != null }
+        .associate { bill ->
+            bill.id to project.memberIds.filter { userId ->
+                val status = bill.memberStatuses[userId] ?: return@filter false
+                status.amountOwed > 0L &&
+                    !status.isCreatorConfirmed &&
+                    bill.isMemberApproved(userId)
+            }
+        }
+    val externalRepresentativesForMerge = externalRepresentativeOptions.mapValues { (billId, options) ->
+        selectedExternalRepresentatives[billId]
+            ?.takeIf { it in options }
+            ?: options.firstOrNull { it == currentUser.id }
+            ?: options.firstOrNull().orEmpty()
     }
     val eligibleMergeBillIds = eligibleMergeBills.mapTo(linkedSetOf()) { it.id }
     LaunchedEffect(eligibleMergeBillIds) {
@@ -321,10 +340,57 @@ fun ProjectDetailScreen(
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(bill.title, fontSize = 12.sp, fontWeight = FontWeight.Medium)
                                         Text(
-                                            "${AppRepository.formatCurrency(bill.totalAmount)} • Có người ứng",
+                                            "${AppRepository.formatCurrency(bill.totalAmount)} • ${
+                                                if (bill.debtObject == null) "Có người ứng" else "Chưa ai ứng"
+                                            }",
                                             fontSize = 10.sp,
                                             color = TextMedium
                                         )
+                                    }
+                                }
+                                if (bill.debtObject != null) {
+                                    val representativeId = externalRepresentativesForMerge[bill.id]
+                                    val representative = representativeId?.let(AppRepository::getUserById)
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            "Đại diện trả cho chủ bill:",
+                                            fontSize = 11.sp,
+                                            color = TextMedium
+                                        )
+                                        Box {
+                                            TextButton(
+                                                onClick = {
+                                                    representativeMenuBillId =
+                                                        if (representativeMenuBillId == bill.id) null else bill.id
+                                                },
+                                                enabled = externalRepresentativeOptions[bill.id].orEmpty().isNotEmpty()
+                                            ) {
+                                                Text(
+                                                    representative?.name ?: "Chọn thành viên",
+                                                    fontSize = 11.sp
+                                                )
+                                            }
+                                            DropdownMenu(
+                                                expanded = representativeMenuBillId == bill.id,
+                                                onDismissRequest = { representativeMenuBillId = null }
+                                            ) {
+                                                externalRepresentativeOptions[bill.id].orEmpty().forEach { userId ->
+                                                    DropdownMenuItem(
+                                                        text = {
+                                                            Text(AppRepository.getUserById(userId)?.name ?: "Thành viên")
+                                                        },
+                                                        onClick = {
+                                                            selectedExternalRepresentatives =
+                                                                selectedExternalRepresentatives + (bill.id to userId)
+                                                            representativeMenuBillId = null
+                                                        }
+                                                    )
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -338,7 +404,8 @@ fun ProjectDetailScreen(
                                 // Bước 1: Thực thi thuật toán gộp các bill đã duyệt trong AppRepository
                                 val mergedBill = AppRepository.mergeApprovedBills(
                                     projectId,
-                                    selectedEligibleMergeBillIds
+                                    selectedEligibleMergeBillIds,
+                                    externalRepresentativesForMerge
                                 )
                                 if (mergedBill != null) {
                                     // Tự động mở chi tiết Bill Gộp mới vừa tạo
@@ -346,7 +413,11 @@ fun ProjectDetailScreen(
                                 }
                             },
                             modifier = Modifier.fillMaxWidth(),
-                            enabled = selectedEligibleMergeBillIds.size >= 2,
+                            enabled = selectedEligibleMergeBillIds.size >= 2 &&
+                                externalRepresentativeOptions.all { (billId, options) ->
+                                    billId !in selectedEligibleMergeBillIds ||
+                                        externalRepresentativesForMerge[billId] in options
+                                },
                             colors = ButtonDefaults.buttonColors(containerColor = SecondaryIndigo),
                             shape = RoundedCornerShape(10.dp)
                         ) {
