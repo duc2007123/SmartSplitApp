@@ -919,7 +919,8 @@ fun CreateBillDialog(
     project: Project,
     currentUser: User,
     onDismiss: () -> Unit,
-    onAddBill: (Bill) -> Unit
+    onAddBill: (Bill) -> Unit,
+    initialInputMethod: String = "✍️ Nhập tay"
 ) {
     val allBills by AppRepository.bills.collectAsState()
     // Chọn quyền chỉnh sửa bill: chỉ người tạo hoặc cả nhóm.
@@ -935,9 +936,9 @@ fun CreateBillDialog(
     var billDate by remember { mutableLongStateOf(todayBillDateMillis()) }
     var showBillDatePicker by remember { mutableStateOf(false) }
     val billDatePickerState = rememberDatePickerState(initialSelectedDateMillis = billDate)
-    var inputMethod by remember { mutableStateOf("Nhập tay") }
-    var showVoiceBillInput by remember(project.id) { mutableStateOf(false) }
-    var showReceiptBillInput by remember(project.id) { mutableStateOf(false) }
+    var inputMethod by remember(initialInputMethod) { mutableStateOf(initialInputMethod) }
+    var showVoiceBillInput by remember(project.id, initialInputMethod) { mutableStateOf(initialInputMethod == "🎤 Giọng nói") }
+    var showReceiptBillInput by remember(project.id, initialInputMethod) { mutableStateOf(initialInputMethod == "📷 Chụp ảnh OCR") }
 
     // Danh sách món đồ
     var itemName by remember { mutableStateOf("") }

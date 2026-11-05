@@ -71,14 +71,35 @@ fun ReceiptBillDraftDialog(
                 val bitmap = withContext(Dispatchers.IO) {
                     ReceiptOcrAnalyzer.loadBitmap(context, uri)
                 }
-                val result = ReceiptAiHelper.scanReceiptToDraftItems(bitmap).getOrThrow()
-                billTitle.value = "Hóa đơn quét ảnh"
-                items.clear()
-                items.addAll(result.map { item ->
-                    BillItem(name = item.name, quantity = item.quantity, unitPrice = item.price)
-                })
-                if (result.isEmpty()) {
-                    errorMessage.value = "Gemini không tìm thấy món có giá đọc được trong ảnh."
+                val aiResult = ReceiptAiHelper.scanReceiptToDraftItems(bitmap)
+                val scannedItems = aiResult.getOrNull()
+
+                if (!scannedItems.isNullOrEmpty()) {
+                    billTitle.value = "Hóa đơn quét ảnh"
+                    items.clear()
+                    items.addAll(scannedItems.map { item ->
+                        BillItem(name = item.name, quantity = item.quantity, unitPrice = item.price)
+                    })
+                } else {
+                    val ocrResult = withContext(Dispatchers.IO) {
+                        ReceiptOcrAnalyzer.analyzeBitmap(bitmap)
+                    }
+                    if (ocrResult.items.isNotEmpty()) {
+                        billTitle.value = ocrResult.title.ifBlank { "Hóa đơn quét ảnh" }
+                        items.clear()
+                        items.addAll(ocrResult.items)
+                        Toast.makeText(
+                            context,
+                            "Đã quét món bằng bộ nhận diện OCR trên máy",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    } else if (aiResult.isFailure) {
+                        val error = aiResult.exceptionOrNull()
+                        errorMessage.value =
+                            "Không phân tích được ảnh: ${error?.localizedMessage ?: "lỗi không xác định"}"
+                    } else {
+                        errorMessage.value = "Gemini không tìm thấy món có giá đọc được trong ảnh."
+                    }
                 }
             } catch (error: CancellationException) {
                 throw error

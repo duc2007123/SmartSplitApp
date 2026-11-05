@@ -818,6 +818,7 @@ fun HomeScreen(
         QuickBillInputDialog(
             projects = projects,
             currentUser = currentUser,
+            initialMethod = "✍️ Nhập tay",
             onDismiss = { showManualBillDialog = false },
             onBillCreated = { bill ->
                 AppRepository.addBill(bill)
@@ -828,12 +829,13 @@ fun HomeScreen(
 
     // [MỤC 1.5.1] Dialog Chụp ảnh OCR & Phân tích Hóa đơn thực tế
     if (showOcrBillDialog) {
-        OcrScanBillDialog(
+        QuickBillInputDialog(
             projects = projects,
             currentUser = currentUser,
+            initialMethod = "📷 Chụp ảnh OCR",
             onDismiss = { showOcrBillDialog = false },
-            onPushToProject = { selectedProjectId, billTitle, items, advanceUserId ->
-                handlePushBillToProject(selectedProjectId, billTitle, items, advanceUserId)
+            onBillCreated = { bill ->
+                AppRepository.addBill(bill)
                 showOcrBillDialog = false
             }
         )
@@ -841,12 +843,13 @@ fun HomeScreen(
 
     // [MỤC 1.5.2] Dialog Giọng nói AI & Bóc tách Hóa đơn
     if (showVoiceBillDialog) {
-        VoiceAiBillDialog(
+        QuickBillInputDialog(
             projects = projects,
             currentUser = currentUser,
+            initialMethod = "🎤 Giọng nói",
             onDismiss = { showVoiceBillDialog = false },
-            onPushToProject = { selectedProjectId, billTitle, items, advanceUserId ->
-                handlePushBillToProject(selectedProjectId, billTitle, items, advanceUserId)
+            onBillCreated = { bill ->
+                AppRepository.addBill(bill)
                 showVoiceBillDialog = false
             }
         )
@@ -1481,10 +1484,13 @@ fun BillEditHistoryDialog(
 fun QuickBillInputDialog(
     projects: List<Project>,
     currentUser: User,
+    initialMethod: String = "✍️ Nhập tay",
     onDismiss: () -> Unit,
     onBillCreated: (Bill) -> Unit
 ) {
-    var selectedProjectId by remember { mutableStateOf<String?>(null) }
+    var selectedProjectId by remember {
+        mutableStateOf(if (projects.size == 1) projects.first().id else null)
+    }
     val selectedProject = projects.firstOrNull { it.id == selectedProjectId }
 
     if (selectedProject == null) {
@@ -1531,8 +1537,9 @@ fun QuickBillInputDialog(
         CreateBillDialog(
             project = selectedProject,
             currentUser = currentUser,
-            onDismiss = { selectedProjectId = null },
-            onAddBill = onBillCreated
+            onDismiss = onDismiss,
+            onAddBill = onBillCreated,
+            initialInputMethod = initialMethod
         )
     }
 }

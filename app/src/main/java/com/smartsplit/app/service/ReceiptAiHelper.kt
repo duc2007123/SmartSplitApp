@@ -17,15 +17,16 @@ data class DraftScannedItem(
 )
 
 object ReceiptAiHelper {
-    private const val MODEL_NAME = "gemini-3.8-flash"
+    private const val PRIMARY_MODEL = "gemini-3.8-flash"
+    private const val FALLBACK_MODEL = "gemini-3.5-flash-lite"
 
-    private val visionModel: GenerativeModel by lazy {
+    private fun getModel(modelName: String): GenerativeModel {
         val apiKey = BuildConfig.GEMINI_API_KEY
         require(apiKey.isNotBlank()) {
             "Chưa cấu hình GEMINI_API_KEY trong local.properties."
         }
-        GenerativeModel(
-            modelName = MODEL_NAME,
+        return GenerativeModel(
+            modelName = modelName,
             apiKey = apiKey,
             generationConfig = generationConfig {
                 temperature = 0.1f
@@ -60,8 +61,15 @@ object ReceiptAiHelper {
                    {"name":"Tên món","quantity":1,"price":10000}
                    quantity là số nguyên từ 1 đến 99; price là đơn giá VNĐ dạng số nguyên.
             """.trimIndent()
-            val response = visionModel.generateContent(prompt)
-            Result.success(parseJsonToDraftItems(requireNotNull(response.text) {
+
+            val text = try {
+                getModel(PRIMARY_MODEL).generateContent(prompt).text
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                getModel(FALLBACK_MODEL).generateContent(prompt).text
+            }
+
+            Result.success(parseJsonToDraftItems(requireNotNull(text) {
                 "Gemini không trả về nội dung."
             }))
         } catch (error: CancellationException) {
@@ -89,13 +97,26 @@ object ReceiptAiHelper {
                 Trả về duy nhất mảng JSON, ví dụ:
                 [{"name":"Bò mỹ nướng","quantity":2,"price":120000}]
             """.trimIndent()
-            val response = visionModel.generateContent(
-                content {
-                    image(bitmap.toGeminiSize())
-                    text(prompt)
-                }
-            )
-            Result.success(parseJsonToDraftItems(requireNotNull(response.text) {
+
+            val scaledBitmap = bitmap.toGeminiSize()
+            val text = try {
+                getModel(PRIMARY_MODEL).generateContent(
+                    content {
+                        image(scaledBitmap)
+                        text(prompt)
+                    }
+                ).text
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                getModel(FALLBACK_MODEL).generateContent(
+                    content {
+                        image(scaledBitmap)
+                        text(prompt)
+                    }
+                ).text
+            }
+
+            Result.success(parseJsonToDraftItems(requireNotNull(text) {
                 "Gemini không trả về nội dung."
             }))
         } catch (error: CancellationException) {
