@@ -401,21 +401,7 @@ fun HomeScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
 
-            if (syncError != null) {
-                item {
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            text = syncError.orEmpty(),
-                            color = MaterialTheme.colorScheme.onErrorContainer,
-                            modifier = Modifier.padding(12.dp),
-                            fontSize = 12.sp
-                        )
-                    }
-                }
-            }
+            // syncError banner ẩn — lỗi cloud permission không hiển thị ra UI
 
             // Hiển thị Banner thông báo đẩy In-App nếu có
             if (notifications.isNotEmpty()) {
@@ -548,7 +534,7 @@ fun HomeScreen(
                             Icon(Icons.Default.FlashOn, contentDescription = null, tint = WarningAmber)
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = "Nhập liệu bill nhanh (Mặc định NB1)",
+                                text = "⚡ Nhập liệu bill nhanh",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold
                             )
@@ -976,7 +962,7 @@ fun FinanceTipsCarousel() {
     val tips = listOf(
         Pair("💡 Mẹo Xoay Vòng Tiền", "Dùng nút [Gộp Bill] để triệt tiêu các khoản nợ chéo, chỉ cần chuyển tiền 1-2 lần thay vì 6 lần!"),
         Pair("⚡ Quét VietQR Tự Động Gạch Nợ", "Chuyển khoản đúng cú pháp SM_... để hệ thống tự động tích ☑️ Đã duyệt và ☑️ Đã trả ngay lập tức!"),
-        Pair("👥 Chế độ NB2 Bình Đẳng", "Khi đi ăn nhóm, bật NB2 để ai ăn món nào tự tick tên món đó, không lo cãi nhau khi chia tiền!")
+        Pair("👥 Chế độ Cùng Sửa (Nhóm)", "Khi đi ăn nhóm, bật chế độ Cùng Sửa để ai ăn món nào tự tick tên món đó, không lo cãi nhau khi chia tiền!")
     )
 
     Row(

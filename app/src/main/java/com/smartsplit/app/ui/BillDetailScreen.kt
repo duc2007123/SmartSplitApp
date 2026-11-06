@@ -288,7 +288,7 @@ fun BillDetailScreen(
                         // Danh sách món đồ trong bill (Mục 1.9.4.2)
                         if (bill.items.isNotEmpty()) {
                             Text(
-                                text = if (bill.mode == InputMode.NB2) "Món đồ (NB2: Tick món bạn đã ăn):" else "Món đồ trong bill:",
+                                text = if (bill.mode == InputMode.NB2) "Món đồ (tick món bạn đã ăn):" else "Món đồ trong bill:",
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = TextDark
@@ -1241,7 +1241,7 @@ fun EditBillDialog(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text(
-                    "Người tạo và thành viên NB2 dùng chung màn hình này. Lưu sẽ tính lại phần chia và trạng thái thanh toán.",
+                    "Người tạo và thành viên dùng chung màn hình này. Lưu sẽ tính lại phần chia và trạng thái thanh toán.",
                     fontSize = 12.sp,
                     color = TextMedium
                 )
@@ -1486,7 +1486,7 @@ fun Nb2EditItemDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Chỉnh sửa món đồ (NB2)", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
+        title = { Text("Chỉnh sửa món đồ", fontWeight = FontWeight.Bold, fontSize = 16.sp) },
         text = {
             Column(
                 modifier = Modifier

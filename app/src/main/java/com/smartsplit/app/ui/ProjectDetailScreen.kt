@@ -546,7 +546,7 @@ fun ProjectDetailScreen(
                 ) {
                     Icon(Icons.Default.ReceiptLong, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Thêm Bill (NB1/NB2)", fontWeight = FontWeight.Bold)
+                    Text("Thêm Bill", fontWeight = FontWeight.Bold)
                 }
             }
 
@@ -773,7 +773,7 @@ fun BillCardItem(
                             shape = RoundedCornerShape(6.dp)
                         ) {
                             Text(
-                                text = if (bill.mode == InputMode.NB1) "NB1 (Cá nhân)" else "NB2 (Cùng sửa)",
+                                text = if (bill.mode == InputMode.NB1) "Cá nhân" else "Cùng sửa",
                                 fontSize = 10.sp,
                                 color = if (bill.mode == InputMode.NB1) PrimaryTealDark else WarningAmber,
                                 fontWeight = FontWeight.Bold,
